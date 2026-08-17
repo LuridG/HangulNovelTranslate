@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .book import load_book
 from .config import AppConfig
-from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary, extract_glossary_with_llm, extract_more_glossary, find_nickname_entries
+from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
@@ -214,6 +214,10 @@ class App(ctk.CTk):
         ctk.CTkButton(header, text="提取词表", width=90, command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(header, text="提取更多词表", width=110, command=self._extract_more_glossary_async).grid(row=0, column=4, padx=4)
         ctk.CTkButton(header, text="完善信息", width=90, command=self._enrich_glossary_async).grid(row=0, column=5, padx=4)
+        self.enrich_alts_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(header, text="补可能译法", variable=self.enrich_alts_var).grid(row=0, column=6, padx=(6, 0))
+        self.enrich_nick_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(header, text="检测昵称", variable=self.enrich_nick_var).grid(row=0, column=7, padx=(0, 4))
         ctk.CTkButton(header, text="保存词表", width=90, command=self._save_glossary).grid(row=0, column=2, padx=4)
         ctk.CTkButton(header, text="加载词表", width=90, command=self._load_glossary).grid(row=0, column=3, padx=4)
 
@@ -586,15 +590,29 @@ class App(ctk.CTk):
         if not self.glossary.valid_entries():
             messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
             return
+        do_alts = self.enrich_alts_var.get()
+        do_nick = self.enrich_nick_var.get()
+        if not do_alts and not do_nick:
+            messagebox.showinfo("提示", "请至少勾选“补可能译法”或“检测昵称”中的一项", parent=self)
+            return
         self.cancel_event.clear()
         self._set_busy(True)
         self.progress.set(0)
+        steps = []
+        if do_alts:
+            steps.append("补充可能译法/备注")
+        if do_nick:
+            steps.append("检测人物昵称")
         self.status_var.set("完善词表中…")
-        self.log("开始完善词表：请求 LLM 补充可能译法等信息（不传原文）")
-        self.worker = threading.Thread(target=self._enrich_worker, daemon=True)
+        self.log("开始完善词表：" + " + ".join(steps))
+        self.worker = threading.Thread(
+            target=self._enrich_worker,
+            args=(do_alts, do_nick),
+            daemon=True,
+        )
         self.worker.start()
 
-    def _enrich_worker(self):
+    def _enrich_worker(self, do_alts: bool, do_nick: bool):
         try:
             config = self._config_from_ui()
             input_path = self.input_var.get().strip()
@@ -604,9 +622,13 @@ class App(ctk.CTk):
             else:
                 source_text = self.glossary.source_text
             llm = LLMClient(config)
-            stats = enrich_glossary(llm, self.glossary)
-            nick_stats = find_nickname_entries(llm, self.glossary, source_text)
-            stats.update(nick_stats)
+            stats = enrich_glossary_with_nicknames(
+                llm,
+                self.glossary,
+                source_text,
+                do_alts=do_alts,
+                do_nick=do_nick,
+            )
             self.after(0, lambda: self._on_enrich_done(stats))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
@@ -620,14 +642,16 @@ class App(ctk.CTk):
         added_nick = stats.get("nickname_added", 0)
         nick_skip = stats.get("nickname_skipped", 0)
         nick_miss = stats.get("nickname_not_found", 0)
+        updated_alts = stats.get("updated_alts", 0)
+        updated_notes = stats.get("updated_notes", 0)
         self.log(
-            f"完善完成：{stats['updated_alts']} 条补充/更新了可能译法，"
-            f"{stats['updated_notes']} 条补充了备注，"
+            f"完善完成：{updated_alts} 条补充/更新了可能译法，"
+            f"{updated_notes} 条补充了备注，"
             f"新增昵称词条 {added_nick} 条（跳过 {nick_skip}，原文未找到 {nick_miss}）"
         )
         messagebox.showinfo(
             "完成",
-            f"已完善 {stats['updated_alts']} 条词条的可能译法。\n"
+            f"已完善 {updated_alts} 条词条的可能译法。\n"
             f"新增昵称词条 {added_nick} 条（kind=person-nickname）。\n请在表格中复核后确认。",
             parent=self,
         )

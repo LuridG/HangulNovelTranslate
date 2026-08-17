@@ -11,6 +11,7 @@ from hangul_novel_translator.glossary import (
     Glossary,
     GlossaryEntry,
     enrich_glossary,
+    enrich_glossary_with_nicknames,
     extract_more_glossary,
     find_nickname_entries,
     payload_to_glossary,
@@ -70,6 +71,19 @@ class FakeLLM:
         self.calls.append(messages)
         return self.payload
 
+
+class FakeLLMSequence:
+    """按调用顺序依次返回预设 payload，用于模拟同一流程内的多次 LLM 请求。"""
+
+    def __init__(self, *payloads: str):
+        self.payloads = list(payloads)
+        self.calls: list[list[dict]] = []
+
+    def chat(self, messages, *, temperature=None, json_mode=False):
+        self.calls.append(messages)
+        if not self.payloads:
+            return "{}"
+        return self.payloads.pop(0)
 
 class ExtractMoreGlossaryTest(unittest.TestCase):
     def test_prompt_includes_existing_and_sample(self):
@@ -339,6 +353,53 @@ class FindNicknameTest(unittest.TestCase):
         self.assertIn("최범진", user)
         self.assertNotIn("서울", user)
         self.assertIn("昵称", NICKNAME_JUDGE_SYSTEM)
+
+class EnrichWithNicknamesTest(unittest.TestCase):
+    def test_nickname_first_then_alts_in_same_run(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔范镇", kind="person", confirmed=True),
+            ]
+        )
+        llm = FakeLLMSequence(
+            '{"entries":[{"ko":"최범진","nicknames":[{"ko":"범진","zh":"范镇"}]}]}',
+            '{"entries":[{"ko":"범진","zh":"范镇","alts":"范振","note":""}]}',
+        )
+        stats = enrich_glossary_with_nicknames(llm, glossary, "범진이가 왔다. 최범진은 웃었다.")
+        self.assertEqual(stats["nickname_added"], 1)
+        self.assertEqual(stats["updated_alts"], 1)
+        by_ko = {e.ko: e for e in glossary.entries}
+        self.assertEqual(by_ko["범진"].kind, "person-nickname")
+        self.assertEqual(by_ko["범진"].alternatives, "范振")
+        # 顺序：第一次请求是昵称检测，第二次才是可能译法补充。
+        self.assertIn("nicknames", llm.calls[0][0]["content"])
+        self.assertIn("alts", llm.calls[1][0]["content"])
+
+    def test_do_alts_only(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔范镇", kind="person", confirmed=True),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"최범진","zh":"崔范镇","alts":"范振"}]}')
+        stats = enrich_glossary_with_nicknames(llm, glossary, "범진이가 왔다.", do_nick=False)
+        self.assertEqual(stats["updated_alts"], 1)
+        self.assertNotIn("nickname_added", stats)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIn("alts", llm.calls[0][0]["content"])
+
+    def test_do_nick_only(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔范镇", kind="person", confirmed=True),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"최범진","nicknames":[]}]}')
+        stats = enrich_glossary_with_nicknames(llm, glossary, "최범진은 웃었다.", do_alts=False)
+        self.assertEqual(stats["nickname_added"], 0)
+        self.assertNotIn("updated_alts", stats)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIn("nicknames", llm.calls[0][0]["content"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -501,6 +501,26 @@ def find_nickname_entries(
     }
 
 
+def enrich_glossary_with_nicknames(
+    llm: LLMClient,
+    glossary: Glossary,
+    source_text: str,
+    *,
+    do_alts: bool = True,
+    do_nick: bool = True,
+) -> dict[str, int]:
+    """完善信息总流程：先检测并新增昵称词条，再为全部词条（含新昵称）补充可能译法与备注。
+
+    顺序很关键：昵称先入库、alts 后处理，本次新增的 person-nickname 也能在同一次
+    运行里拿到可能译法，且不增加 LLM 调用次数。
+    """
+    stats: dict[str, int] = {}
+    if do_nick:
+        stats.update(find_nickname_entries(llm, glossary, source_text))
+    if do_alts:
+        stats.update(enrich_glossary(llm, glossary))
+    return stats
+
 def payload_to_glossary(payload: Any, source_text: str = "") -> Glossary:
     glossary = Glossary(source_text=source_text)
     if isinstance(payload, list):
