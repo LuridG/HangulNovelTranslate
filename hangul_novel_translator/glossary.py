@@ -197,6 +197,8 @@ EXTRACTION_SYSTEM = """你是一名资深的韩语小说中文译者与编辑，
 - 必须提取原形，去掉助词与词尾：正文中的“준희가”“준희는”“제원을”应统一提取为“준희”“제원”。
 - 不要包含称呼后缀：不要带“씨/님/군/양/선생님”等。
 - 同一实体只保留一条：正文中同一人、地、物有多种写法时，取最常见、最完整的形式。
+- 人物全名与昵称/短称分别建条目：如全名“최범진（崔范镇）”与昵称“범진（范镇）”是两条词条；昵称条目 kind=person-nickname，note 注明“崔范镇的昵称”。
+- 有意的昵称/短称（只叫名字、不带姓）不要放进全名词条的 alts。
 
 【译名规范】
 - 中文译名一律使用简体中文，并在全书中保持一致。
@@ -204,13 +206,14 @@ EXTRACTION_SYSTEM = """你是一名资深的韩语小说中文译者与编辑，
 - 拿不准时也要给出最合理的译名，并在 note 中注明“待确认”。
 
 【可能译法】
-- 每个词条尽量给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏（“金俊熙”写成“俊熙”）、同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
+- 每个词条尽量给出 1-3 个“可能译法”（alts）：只放真正的“错误写法”，如同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
+- 有意的昵称/短称（漏掉姓氏、只叫名字）不属于 alts，应单独建 person-nickname 词条。
 - 可能译法用中文、半角逗号分隔；不要包含正确译名本身，也不要包含韩文原词；没有明显易错形式时 alts 留空字符串。
 
 【输出格式】
 只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
-字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
-示例：{"entries":[{"ko":"준희","zh":"俊熙","kind":"person","note":"","alts":"俊希,俊曦"}]}"""
+字段：ko=韩文原词，zh=中文译名，kind=person|person-nickname|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
+示例：{"entries":[{"ko":"준희","zh":"俊熙","kind":"person","note":"","alts":"俊希,俊曦"},{"ko":"범진","zh":"范镇","kind":"person-nickname","note":"崔范镇的昵称","alts":""}]}"""
 
 
 def extract_glossary_with_llm(llm: LLMClient, sample_text: str, limit: int) -> Glossary:
@@ -257,18 +260,21 @@ EXTRACTION_MORE_SYSTEM = """你是一名资深的韩语小说中文译者与编�
 - 必须提取原形，去掉助词与词尾：正文中的“준희가”“준희는”“제원을”应统一提取为“준희”“제원”。
 - 不要包含称呼后缀：不要带“씨/님/군/양/선생님”等。
 - 同一实体只保留一条：多种写法取最常见、最完整的形式。
+- 人物全名与昵称/短称分别建条目：如全名“최범진（崔范镇）”与昵称“범진（范镇）”是两条词条；昵称条目 kind=person-nickname，note 注明“崔范镇的昵称”。
+- 有意的昵称/短称（只叫名字、不带姓）不要放进全名词条的 alts。
 
 【译名规范】
 - 中文译名一律使用简体中文，并与现有词表的用字风格保持一致。
 - 优先使用常见汉字，避免生僻音译字；拿不准时也要给出最合理的译名，并在 note 中注明“待确认”。
 
 【可能译法】
-- 每个新词条尽量给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏、同音或形近错别字、前后不一致的写法。
+- 每个新词条尽量给出 1-3 个“可能译法”（alts）：只放真正的“错误写法”，如同音或形近错别字、前后不一致的写法。
+- 有意的昵称/短称（漏掉姓氏、只叫名字）不属于 alts，应单独建 person-nickname 词条。
 - 可能译法用中文、半角逗号分隔；不要包含正确译名本身，也不要包含韩文原词；没有明显易错形式时 alts 留空字符串。
 
 【输出格式】
 只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
-字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
+字段：ko=韩文原词，zh=中文译名，kind=person|person-nickname|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
 示例：{"entries":[{"ko":"제원","zh":"宰元","kind":"person","note":"","alts":"宰沅,在元"}]}"""
 
 
@@ -318,9 +324,10 @@ ENRICH_SYSTEM = """你是一名资深的韩语小说中文译者与编辑。用�
 
 【任务】
 对用户给出的每个词条：
-1. 给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏（“金俊熙”写成“俊熙”）、同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
-2. 如果某个词条确实没有明显易错形式，alts 留空字符串。
-3. 不要修改 ko、zh、kind；如果原有 note 为空，可以补充一句简短说明。
+1. 给出 1-3 个“可能译法”（alts）：只放真正的“错误写法”，如同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
+2. 有意的昵称/短称（漏掉姓氏、只叫名字）不要放进 alts；这类会单独维护成 person-nickname 词条。
+3. 如果某个词条确实没有明显易错形式，alts 留空字符串。
+4. 不要修改 ko、zh、kind；如果原有 note 为空，可以补充一句简短说明。
 
 【词形规范】
 - 可能译法必须是中文，半角逗号分隔。
@@ -383,42 +390,53 @@ def enrich_glossary(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
     return {"updated_alts": updated_alts, "updated_notes": updated_notes}
 
 
-JUDGE_SHORT_SYSTEM = """你是一名资深的韩语小说中文译者与编辑。用户有一份专有名词词表，其中部分词条的可能译法里含有“短称”（不带姓、只有名字的称呼，例如“崔范镇”的短称“范镇”）。
-在小说里，人物关系亲密时常常只叫名字（短称），这是有意的写法；但有时短称只是译名不一致或漏字，需要统一为全名。
+# 韩文常见助词/词尾字符：搜索“昵称是否独立出现”时用于剔除全名带助词的形式。
+_NICKNAME_PARTICLE_CHARS = "이가은는을를과와의도만"
+
+
+def _strip_full_name_occurrences(source: str, full_name: str) -> str:
+    """把原文中的“全名+（可选助词）”整体剔除，用于判断昵称是否独立出现。"""
+    pattern = re.compile(re.escape(full_name) + f"[{_NICKNAME_PARTICLE_CHARS}]?")
+    return pattern.sub("", source)
+
+
+NICKNAME_JUDGE_SYSTEM = """你是一名资深的韩语小说中文译者与编辑。用户有一份专有名词词表，其中 kind=person 的是人物全名词条。
+在韩语小说里，人物常被用昵称/短称称呼（不带姓、只叫名字，有时带爱称词尾），例如“최범진（崔范镇）”的昵称是“범진（范镇）”。
 
 【任务】
-对用户给出的每个词条，判断它的短称是“有意的亲昵称呼”（应保留，replace_short=false）还是“应统一为全名”（replace_short=true）。
-判断依据：
-- 短称作为人物间的称呼出现，且整体以名字互称 → 有意的亲昵称呼，保留。
-- 短称明显是译名不一致或漏字 → 统一为全名。
-- 拿不准时倾向“保留”（false），避免破坏原文的亲昵感。
+对每个 person 词条，判断该人物在文中是否可能有常用昵称或短称。如果有，给出：
+- ko：昵称的韩文原形（去掉助词/词尾/称呼后缀，如“범진이”→“범진”）
+- zh：昵称的中文译法（简体中文）
+注意：
+- 昵称的韩文必须与全名不同，且明显是同一人物的短称/爱称；不要编造原文没有的称呼。
+- 不要返回全名本身作为昵称；没有常用昵称时 nicknames 返回空数组。
 
 【输出格式】
 只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
-字段：ko=韩文原词（必须与输入完全一致），replace_short=布尔值。
-示例：{"entries":[{"ko":"범진","replace_short":false}]}"""
+字段：ko=韩文原词（必须与输入完全一致），nicknames=[{"ko":"...","zh":"..."}]。
+示例：{"entries":[{"ko":"최범진","nicknames":[{"ko":"범진","zh":"范镇"}]},{"ko":"김준희","nicknames":[]}]}"""
 
 
-def judge_short_forms(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
-    """让 LLM 判断存在短称的词条是否应把短称替换为全名，返回更新统计。"""
-    candidates: list[tuple[GlossaryEntry, list[str]]] = []
-    for entry in glossary.valid_entries():
-        short_alts = [alt for alt in entry.alternative_list() if alt in entry.zh]
-        if short_alts:
-            candidates.append((entry, short_alts))
-    if not candidates:
-        return {"updated": 0}
+def find_nickname_entries(
+    llm: LLMClient,
+    glossary: Glossary,
+    source_text: str,
+) -> dict[str, int]:
+    """让 LLM 分析 person 词条的可能昵称，并在原文中搜索韩文昵称；
+    确认独立出现后新增 kind=person-nickname 词条。返回 {"nickname_added", "nickname_skipped", "nickname_not_found"}。"""
+    persons = [e for e in glossary.valid_entries() if e.kind == "person"]
+    source = (source_text or "").strip()
+    if not persons or not source:
+        return {"nickname_added": 0, "nickname_skipped": 0, "nickname_not_found": 0}
 
-    lines: list[str] = []
-    for entry, short_alts in candidates:
-        lines.append(f"- ko={entry.ko} | zh={entry.zh} | 短称={','.join(short_alts)}")
+    lines = [f"- ko={e.ko} | zh={e.zh} | note={e.note or ''}" for e in persons]
     user = (
-        "请判断下列词条的短称是否为有意的亲昵称呼：\n\n"
+        "请分析下列人物词条可能出现的昵称/短称：\n\n"
         + "\n".join(lines)
         + "\n\n只输出一个 JSON 对象，每个词条的 ko 必须与输入完全一致。"
     )
     messages = [
-        {"role": "system", "content": JUDGE_SHORT_SYSTEM},
+        {"role": "system", "content": NICKNAME_JUDGE_SYSTEM},
         {"role": "user", "content": user},
     ]
     raw_response = llm.chat(messages, temperature=0.1, json_mode=True)
@@ -431,24 +449,52 @@ def judge_short_forms(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
     if not isinstance(raw_entries, list):
         raise ValueError("模型返回结构不正确：缺少 entries 数组")
 
-    by_ko = {e.ko: e for e in glossary.entries}
-    updated = 0
+    existing_kos = {e.ko for e in glossary.entries}
+    by_ko = {e.ko: e for e in persons}
+    added = 0
+    skipped = 0
+    not_found = 0
     for item in raw_entries:
         if not isinstance(item, dict):
             continue
-        ko = str(item.get("ko", "")).strip()
-        target = by_ko.get(ko)
-        raw_value = item.get("replace_short")
-        if target is None or raw_value is None:
+        person = by_ko.get(str(item.get("ko", "")).strip())
+        if person is None:
             continue
-        if isinstance(raw_value, str):
-            new_value = raw_value.strip().lower() in ("true", "1", "yes")
-        else:
-            new_value = bool(raw_value)
-        if target.replace_short != new_value:
-            target.replace_short = new_value
-            updated += 1
-    return {"updated": updated}
+        nick_list = item.get("nicknames") or []
+        if not isinstance(nick_list, list):
+            continue
+        for nick in nick_list:
+            if not isinstance(nick, dict):
+                skipped += 1
+                continue
+            ko = str(nick.get("ko", "")).strip()
+            zh = str(nick.get("zh", "")).strip()
+            if not ko or not zh or len(ko) < 2 or ko == person.ko or zh == person.zh:
+                skipped += 1
+                continue
+            if ko in existing_kos:
+                skipped += 1
+                continue
+            search_source = _strip_full_name_occurrences(source, person.ko)
+            if ko not in search_source:
+                not_found += 1
+                continue
+            glossary.entries.append(
+                GlossaryEntry(
+                    ko=ko,
+                    zh=zh,
+                    kind="person-nickname",
+                    note=f"{person.zh}的昵称",
+                    confirmed=False,
+                )
+            )
+            existing_kos.add(ko)
+            added += 1
+    return {
+        "nickname_added": added,
+        "nickname_skipped": skipped,
+        "nickname_not_found": not_found,
+    }
 
 
 def payload_to_glossary(payload: Any, source_text: str = "") -> Glossary:

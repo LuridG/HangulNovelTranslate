@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .book import load_book
 from .config import AppConfig
-from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary, extract_glossary_with_llm, extract_more_glossary, judge_short_forms
+from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary, extract_glossary_with_llm, extract_more_glossary, find_nickname_entries
 from .llm import LLMClient
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
@@ -45,7 +45,7 @@ class GlossaryEditDialog(ctk.CTkToplevel):
         self.kind_var = tk.StringVar(value=self.entry.kind)
         ctk.CTkComboBox(
             self,
-            values=["person", "place", "org", "term", "title"],
+            values=["person", "person-nickname", "place", "org", "term", "title"],
             variable=self.kind_var,
             width=180,
         ).grid(row=2, column=1, padx=12, pady=6, sticky="w")
@@ -248,7 +248,7 @@ class App(ctk.CTk):
         widths = {
             "ko": 150,
             "zh": 150,
-            "kind": 70,
+            "kind": 110,
             "note": 110,
             "alternatives": 130,
             "confirmed": 60,
@@ -275,9 +275,8 @@ class App(ctk.CTk):
         ctk.CTkButton(actions, text="确认选中", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
         ctk.CTkButton(actions, text="全部确认", width=90, command=self._confirm_all).grid(row=0, column=4, padx=4)
         ctk.CTkButton(actions, text="清理重复", width=90, command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
-        ctk.CTkButton(actions, text="判断短称", width=90, command=self._judge_short_async).grid(row=0, column=6, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
-        self.count_label.grid(row=0, column=7, padx=12, sticky="e")
+        self.count_label.grid(row=0, column=6, padx=12, sticky="e")
 
     def _build_bottom(self, parent):
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -598,8 +597,16 @@ class App(ctk.CTk):
     def _enrich_worker(self):
         try:
             config = self._config_from_ui()
+            input_path = self.input_var.get().strip()
+            if input_path and Path(input_path).exists():
+                book = load_book(Path(input_path))
+                source_text = "\n".join(ch.text for ch in book.chapters)
+            else:
+                source_text = self.glossary.source_text
             llm = LLMClient(config)
             stats = enrich_glossary(llm, self.glossary)
+            nick_stats = find_nickname_entries(llm, self.glossary, source_text)
+            stats.update(nick_stats)
             self.after(0, lambda: self._on_enrich_done(stats))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
@@ -610,56 +617,21 @@ class App(ctk.CTk):
         self._set_busy(False)
         self.progress.set(1)
         self.status_var.set("词表完善完成")
+        added_nick = stats.get("nickname_added", 0)
+        nick_skip = stats.get("nickname_skipped", 0)
+        nick_miss = stats.get("nickname_not_found", 0)
         self.log(
             f"完善完成：{stats['updated_alts']} 条补充/更新了可能译法，"
-            f"{stats['updated_notes']} 条补充了备注"
+            f"{stats['updated_notes']} 条补充了备注，"
+            f"新增昵称词条 {added_nick} 条（跳过 {nick_skip}，原文未找到 {nick_miss}）"
         )
         messagebox.showinfo(
             "完成",
-            f"已完善 {stats['updated_alts']} 条词条的可能译法。\n请在表格中复核后确认。",
+            f"已完善 {stats['updated_alts']} 条词条的可能译法。\n"
+            f"新增昵称词条 {added_nick} 条（kind=person-nickname）。\n请在表格中复核后确认。",
             parent=self,
         )
 
-    def _judge_short_async(self):
-        if self.worker and self.worker.is_alive():
-            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
-            return
-        if not self.glossary.valid_entries():
-            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
-            return
-        self.cancel_event.clear()
-        self._set_busy(True)
-        self.progress.set(0)
-        self.status_var.set("判断短称中…")
-        self.log("开始判断短称：请求 LLM 判定昵称短称是否需要替换为全名")
-        self.worker = threading.Thread(target=self._judge_short_worker, daemon=True)
-        self.worker.start()
-
-    def _judge_short_worker(self):
-        try:
-            config = self._config_from_ui()
-            llm = LLMClient(config)
-            stats = judge_short_forms(llm, self.glossary)
-            self.after(0, lambda: self._on_judge_short_done(stats))
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            self.after(0, lambda: self._on_error(message))
-
-    def _on_judge_short_done(self, stats: dict[str, int]):
-        self._refresh_tree()
-        self._set_busy(False)
-        self.progress.set(1)
-        self.status_var.set("短称判断完成")
-        updated = stats["updated"]
-        self.log(f"短称判断完成：{updated} 条词条的短称替换开关已更新，请人工复核")
-        if updated:
-            messagebox.showinfo(
-                "完成",
-                f"已更新 {updated} 条词条的“替换短称”开关。\n请在表格中复核后确认。",
-                parent=self,
-            )
-        else:
-            messagebox.showinfo("提示", "没有发现需要更新的短称。", parent=self)
 
     def _cleanup_duplicates(self):
         if not self.glossary.entries:
