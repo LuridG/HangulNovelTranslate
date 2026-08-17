@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -188,8 +189,19 @@ class App(ctk.CTk):
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
 
+        style = ttk.Style(self)
+        style.configure("Glossary.Treeview", font=tkfont.Font(size=13), rowheight=34)
+        style.configure("Glossary.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
+
         columns = ("ko", "zh", "kind", "note", "confirmed")
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18)
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            height=18,
+            selectmode="extended",
+            style="Glossary.Treeview",
+        )
         headings = {
             "ko": "韩文原文",
             "zh": "中文译名",
@@ -199,7 +211,7 @@ class App(ctk.CTk):
         }
         for col in columns:
             self.tree.heading(col, text=headings[col])
-            width = 180 if col in ("ko", "zh") else 70
+            width = 200 if col in ("ko", "zh") else 80
             self.tree.column(col, width=width, anchor="w", stretch=(col in ("ko", "zh", "note")))
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(tree_frame, command=self.tree.yview)
@@ -212,9 +224,10 @@ class App(ctk.CTk):
         ctk.CTkButton(actions, text="新增", width=70, command=self._add_entry).grid(row=0, column=0, padx=4)
         ctk.CTkButton(actions, text="编辑", width=70, command=self._edit_selected).grid(row=0, column=1, padx=4)
         ctk.CTkButton(actions, text="删除", width=70, command=self._remove_selected).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(actions, text="标记确认", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(actions, text="确认选中", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(actions, text="全部确认", width=90, command=self._confirm_all).grid(row=0, column=4, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
-        self.count_label.grid(row=0, column=4, padx=12, sticky="e")
+        self.count_label.grid(row=0, column=5, padx=12, sticky="e")
 
     def _build_bottom(self, parent):
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -333,13 +346,27 @@ class App(ctk.CTk):
         self._refresh_tree()
 
     def _confirm_selected(self):
-        ko = self._selected_ko()
-        if not ko:
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择要确认的词条（可多选）", parent=self)
             return
-        entry = next((e for e in self.glossary.entries if e.ko == ko), None)
-        if entry:
-            entry.confirmed = True
-            self._refresh_tree()
+        selected_kos = {str(self.tree.item(i, "values")[0]) for i in selection}
+        changed = sum(1 for e in self.glossary.entries if e.ko in selected_kos and not e.confirmed)
+        for e in self.glossary.entries:
+            if e.ko in selected_kos:
+                e.confirmed = True
+        self._refresh_tree()
+        self.log(f"已确认 {len(selected_kos)} 条（新增 {changed} 条）")
+
+    def _confirm_all(self):
+        if not self.glossary.entries:
+            messagebox.showinfo("提示", "当前没有词表", parent=self)
+            return
+        changed = sum(1 for e in self.glossary.entries if not e.confirmed)
+        for e in self.glossary.entries:
+            e.confirmed = True
+        self._refresh_tree()
+        self.log(f"已全部确认：{len(self.glossary.entries)} 条（新增 {changed} 条）")
 
     def _save_glossary(self):
         if not self.glossary.entries:
