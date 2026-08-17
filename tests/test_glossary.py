@@ -220,6 +220,49 @@ class AlternativesFeatureTest(unittest.TestCase):
             enrich_glossary(FakeLLM("{}"), Glossary())
 
 
+class ZhHistoryReplacementTest(unittest.TestCase):
+    def test_upsert_records_zh_history(self):
+        glossary = Glossary(entries=[GlossaryEntry(ko="최범진", zh="崔范镇", confirmed=True)])
+        glossary.upsert(GlossaryEntry(ko="최범진", zh="崔凡镇", confirmed=True))
+        entry = glossary.entries[0]
+        self.assertEqual(entry.zh, "崔凡镇")
+        self.assertEqual(entry.zh_history, ["崔范镇"])
+        # 再次修改会追加历史，且不重复。
+        glossary.upsert(GlossaryEntry(ko="최범진", zh="崔汎镇", confirmed=True))
+        self.assertEqual(glossary.entries[0].zh_history, ["崔范镇", "崔凡镇"])
+
+    def test_apply_replacements_uses_zh_history(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔凡镇", confirmed=True, zh_history=["崔范镇"]),
+            ]
+        )
+        self.assertEqual(glossary.apply_replacements("崔范镇来了。"), "崔凡镇来了。")
+
+    def test_zh_history_skips_nickname_entry_zh(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔凡镇", confirmed=True, zh_history=["范镇"]),
+                GlossaryEntry(ko="범진", zh="范镇", kind="person-nickname", confirmed=True),
+            ]
+        )
+        # “范镇”已有独立昵称词条，历史替换不覆盖昵称写法。
+        self.assertEqual(glossary.apply_replacements("范镇来了。"), "范镇来了。")
+
+    def test_zh_history_requires_confirmed(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔凡镇", zh_history=["崔范镇"]),
+            ]
+        )
+        self.assertEqual(glossary.apply_replacements("崔范镇来了。"), "崔范镇来了。")
+
+    def test_from_dict_zh_history_default(self):
+        entry = GlossaryEntry.from_dict({"ko": "a", "zh": "b"})
+        self.assertEqual(entry.zh_history, [])
+        entry2 = GlossaryEntry.from_dict({"ko": "a", "zh": "b", "zh_history": ["旧译名", ""]})
+        self.assertEqual(entry2.zh_history, ["旧译名"])
+
 class ShortNameReplacementTest(unittest.TestCase):
     def test_short_form_alternative_skipped_by_default(self):
         glossary = Glossary(

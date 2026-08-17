@@ -19,6 +19,7 @@ from .book import load_book
 from .config import AppConfig
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
+from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
 
@@ -143,10 +144,16 @@ class App(ctk.CTk):
         right = ctk.CTkFrame(self)
         right.grid(row=0, column=1, padx=(0, 12), pady=12, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=0)
-        right.grid_rowconfigure(1, weight=1)
-        right.grid_rowconfigure(2, weight=0)
-        self._build_right(right)
+        right.grid_rowconfigure(0, weight=1)
+
+        self.tabs = ctk.CTkTabview(right)
+        self.tabs.grid(row=0, column=0, sticky="nsew")
+        self.tab_glossary = self.tabs.add("词表")
+        self.tab_glossary.grid_columnconfigure(0, weight=1)
+        self.tab_glossary.grid_rowconfigure(1, weight=1)
+        self.tab_merge = self.tabs.add("多卷修正")
+        self._build_right(self.tab_glossary)
+        self._build_merge_tab(self.tab_merge)
 
         bottom = ctk.CTkFrame(self)
         bottom.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="ew")
@@ -281,6 +288,72 @@ class App(ctk.CTk):
         ctk.CTkButton(actions, text="清理重复", width=90, command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
         self.count_label.grid(row=0, column=6, padx=12, sticky="e")
+
+    def _build_merge_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
+        self.merge_files: list[Path] = []
+        self.merge_title_var = tk.StringVar(value="多卷合集")
+        self.merge_txt_var = tk.BooleanVar(value=True)
+        self.merge_epub_var = tk.BooleanVar(value=True)
+
+        ctk.CTkLabel(
+            parent,
+            text="多卷翻译存档（.translation_state.json，按列表顺序拼合）",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=12, pady=(14, 6), sticky="w")
+
+        list_frame = ctk.CTkFrame(parent)
+        list_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
+        list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(0, weight=1)
+
+        self.merge_tree = ttk.Treeview(
+            list_frame,
+            columns=("order", "file", "info"),
+            show="headings",
+            height=10,
+            style="Glossary.Treeview",
+        )
+        self.merge_tree.heading("order", text="顺序")
+        self.merge_tree.heading("file", text="存档文件")
+        self.merge_tree.heading("info", text="信息")
+        self.merge_tree.column("order", width=50, anchor="center")
+        self.merge_tree.column("file", width=380, anchor="w", stretch=True)
+        self.merge_tree.column("info", width=220, anchor="w")
+        self.merge_tree.grid(row=0, column=0, sticky="nsew")
+        merge_scroll = ctk.CTkScrollbar(list_frame, command=self.merge_tree.yview)
+        merge_scroll.grid(row=0, column=1, sticky="ns")
+        self.merge_tree.configure(yscrollcommand=merge_scroll.set)
+
+        btns = ctk.CTkFrame(parent, fg_color="transparent")
+        btns.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(btns, text="添加存档", width=90, command=self._add_merge_file).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(btns, text="上移", width=70, command=lambda: self._move_merge_file(-1)).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(btns, text="下移", width=70, command=lambda: self._move_merge_file(1)).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(btns, text="移除", width=70, command=self._remove_merge_files).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(btns, text="清空", width=70, command=self._clear_merge_files).grid(row=0, column=4, padx=4)
+
+        cfg_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        cfg_frame.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
+        ctk.CTkLabel(cfg_frame, text="合并书名").grid(row=0, column=0, padx=(4, 8), sticky="w")
+        ctk.CTkEntry(cfg_frame, textvariable=self.merge_title_var, width=240).grid(row=0, column=1, padx=4, sticky="w")
+        ctk.CTkCheckBox(cfg_frame, text="输出 TXT", variable=self.merge_txt_var).grid(row=0, column=2, padx=(18, 4))
+        ctk.CTkCheckBox(cfg_frame, text="输出 EPUB", variable=self.merge_epub_var).grid(row=0, column=3, padx=4)
+
+        run_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        run_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(run_frame, text="预览修正", width=110, command=self._merge_preview_async).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(run_frame, text="修正并输出", width=130, command=self._merge_run_async).grid(row=0, column=1, padx=4)
+
+        ctk.CTkLabel(
+            parent,
+            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；修正按当前已加载词表执行（含译名历史自动替换）。",
+            wraplength=620,
+            justify="left",
+            anchor="w",
+        ).grid(row=5, column=0, padx=12, pady=(0, 12), sticky="w")
 
     def _build_bottom(self, parent):
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -669,6 +742,167 @@ class App(ctk.CTk):
         else:
             messagebox.showinfo("提示", "没有发现重复词条。", parent=self)
 
+    # ---------------- 多卷修正 ----------------
+    def _add_merge_file(self):
+        files = filedialog.askopenfilenames(
+            title="选择翻译存档 JSON（可多选）",
+            filetypes=[("JSON 存档", "*.json"), ("所有文件", "*.*")],
+            parent=self,
+        )
+        added = 0
+        for raw in files:
+            path = Path(raw)
+            if path in self.merge_files:
+                continue
+            try:
+                inspect_state(path)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showwarning("无法读取", f"{path.name}：{exc}", parent=self)
+                continue
+            self.merge_files.append(path)
+            added += 1
+        if added:
+            self.log(f"已添加 {added} 个翻译存档")
+        self._refresh_merge_tree()
+
+    def _move_merge_file(self, delta: int):
+        selection = self.merge_tree.selection()
+        if not selection:
+            return
+        index = int(selection[0])
+        target = index + delta
+        if 0 <= target < len(self.merge_files):
+            self.merge_files[index], self.merge_files[target] = (
+                self.merge_files[target],
+                self.merge_files[index],
+            )
+            self._refresh_merge_tree()
+            self.merge_tree.selection_set(str(target))
+
+    def _remove_merge_files(self):
+        for iid in sorted(self.merge_tree.selection(), key=int, reverse=True):
+            index = int(iid)
+            if 0 <= index < len(self.merge_files):
+                del self.merge_files[index]
+        self._refresh_merge_tree()
+
+    def _clear_merge_files(self):
+        self.merge_files = []
+        self._refresh_merge_tree()
+
+    def _refresh_merge_tree(self):
+        for item in self.merge_tree.get_children():
+            self.merge_tree.delete(item)
+        for index, path in enumerate(self.merge_files):
+            try:
+                info = inspect_state(path)
+                detail = (
+                    f"{info['title']} · 完成 {info['completed']}/{info['total_chunks']} 块"
+                )
+            except Exception as exc:  # noqa: BLE001
+                detail = f"读取失败：{exc}"
+            self.merge_tree.insert("", "end", iid=str(index), values=(index + 1, str(path), detail))
+
+    def _merge_preview_async(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("预览修正中…")
+        self.log(f"开始预览：{len(self.merge_files)} 个存档，按当前词表统计替换")
+        self.worker = threading.Thread(target=self._merge_worker, args=("preview",), daemon=True)
+        self.worker.start()
+
+    def _merge_run_async(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        output_dir = self.output_var.get().strip()
+        if not output_dir:
+            messagebox.showwarning("提示", "请先选择输出目录", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        if not self.merge_txt_var.get() and not self.merge_epub_var.get():
+            messagebox.showinfo("提示", "请至少勾选“输出 TXT”或“输出 EPUB”", parent=self)
+            return
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("修正并输出中…")
+        self.log(f"开始修正并输出：{len(self.merge_files)} 个存档拼合")
+        self.worker = threading.Thread(target=self._merge_worker, args=("run",), daemon=True)
+        self.worker.start()
+
+    def _merge_worker(self, mode: str):
+        try:
+            config = self._config_from_ui()
+            files = list(self.merge_files)
+            books = [book_from_state(p, config) for p in files]
+            self.after(0, lambda: self.progress.set(0.6))
+            if mode == "preview":
+                merged = merge_books(books)
+                stats = preview_fix(merged, self.glossary)
+                self.after(0, lambda: self._on_merge_preview_done(stats))
+            else:
+                result = export_merged(
+                    books,
+                    self.glossary,
+                    config,
+                    Path(self.output_var.get().strip()),
+                    title=self.merge_title_var.get(),
+                    output_txt=self.merge_txt_var.get(),
+                    output_epub=self.merge_epub_var.get(),
+                )
+                self.after(0, lambda: self._on_merge_run_done(result))
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_merge_preview_done(self, stats: dict[str, int]):
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("预览完成")
+        self.log(
+            f"预览：预计命中 {stats['hit_paragraphs']} 个段落、"
+            f"{stats['hit_sources']} 种旧写法"
+        )
+        messagebox.showinfo(
+            "预览",
+            f"预计将修正 {stats['hit_paragraphs']} 个段落，"
+            f"涉及 {stats['hit_sources']} 种旧写法。\n点“修正并输出”执行。",
+            parent=self,
+        )
+
+    def _on_merge_run_done(self, result: dict):
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("修正输出完成")
+        paths = result["paths"]
+        self.log(
+            f"修正输出完成：{result['chapters']} 章、{result['paragraphs']} 段，"
+            f"命中 {result['hit_paragraphs']} 个段落"
+        )
+        for path in paths:
+            self.log(f"已输出：{path}")
+        messagebox.showinfo(
+            "完成",
+            f"已合并 {result['chapters']} 章，修正命中 {result['hit_paragraphs']} 个段落。\n"
+            + "\n".join(f"· {p}" for p in paths),
+            parent=self,
+        )
     # ---------------- 翻译 ----------------
     def _start_translation(self):
         input_path = self.input_var.get().strip()

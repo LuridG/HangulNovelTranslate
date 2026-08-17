@@ -240,6 +240,8 @@ class Translator:
         failed: dict[str, str] = state.setdefault("failed", {})
         state["source"] = str(input_path)
         state["total_chunks"] = len(chunks)
+        state["chunk_chars"] = self.config.chunk_chars
+        state["max_paragraph_chars"] = self.config.max_paragraph_chars
         self._save_state(state_path, state)
 
         pending = [c for c in chunks if c.id not in completed]

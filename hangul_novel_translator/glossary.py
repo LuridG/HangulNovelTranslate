@@ -47,12 +47,17 @@ class GlossaryEntry:
     confirmed: bool = False
     alternatives: str = ""
     replace_short: bool = False
+    # 曾经确认过的译名历史：词表调整译名后，用于把旧译文中的旧译名替换为新译名。
+    zh_history: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GlossaryEntry":
+        history = data.get("zh_history") or []
+        if not isinstance(history, list):
+            history = []
         return cls(
             ko=str(data.get("ko", "")).strip(),
             zh=str(data.get("zh", "")).strip(),
@@ -61,6 +66,7 @@ class GlossaryEntry:
             confirmed=bool(data.get("confirmed", False)),
             alternatives=str(data.get("alternatives", "")).strip(),
             replace_short=bool(data.get("replace_short", False)),
+            zh_history=[str(x).strip() for x in history if str(x).strip()],
         )
 
     def alternative_list(self) -> list[str]:
@@ -111,6 +117,8 @@ class Glossary:
     def upsert(self, entry: GlossaryEntry) -> None:
         for old in self.entries:
             if old.ko == entry.ko:
+                if old.zh != entry.zh and old.zh and old.zh not in old.zh_history:
+                    old.zh_history = list(old.zh_history) + [old.zh]
                 old.zh = entry.zh
                 old.kind = entry.kind
                 old.note = entry.note
@@ -163,10 +171,12 @@ class Glossary:
         lines = self.to_prompt_lines()
         return "\n".join(lines) if lines else "（无）"
 
-    def apply_replacements(self, text: str) -> str:
-        """翻译后再做一层保底替换：韩文专名替换为人工译名；
-        已确认词条的可能误译（alternatives）也会替换为人工译名，作为对 LLM 的机器矫正。"""
-        # 收集 (源词, 目标译名) 并去重。
+    def replacement_pairs(self) -> list[tuple[str, str]]:
+        """生成全部保底替换对：(ko→zh) 与已确认词条的 (可能译法/历史译名→zh)。
+
+        供翻译回传矫正与“多卷修正”复用；按源串长度降序，避免短词先替换破坏长词。
+        """
+        nickname_zhs = {e.zh for e in self.valid_entries() if e.kind == "person-nickname"}
         pairs: list[tuple[str, str]] = []
         for entry in self.valid_entries():
             pairs.append((entry.ko, entry.zh))
@@ -179,8 +189,19 @@ class Glossary:
                         # 未开启“短称替换”则不强制替换，保留文中亲昵的称呼。
                         continue
                     pairs.append((alt, entry.zh))
-        # 按字符串长度降序，避免短词先替换破坏长词。
-        for src, dst in sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True):
+                for old_zh in entry.zh_history:
+                    if len(old_zh) < _MIN_ALTERNATIVE_LEN or old_zh == entry.zh:
+                        continue
+                    if old_zh in nickname_zhs:
+                        # 该旧译名现在被独立维护为昵称词条，交给昵称词条处理。
+                        continue
+                    pairs.append((old_zh, entry.zh))
+        return sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True)
+
+    def apply_replacements(self, text: str) -> str:
+        """翻译后再做一层保底替换：韩文专名替换为人工译名；
+        已确认词条的可能误译（alternatives）与历史旧译名（zh_history）也会替换为人工译名。"""
+        for src, dst in self.replacement_pairs():
             if src and src in text:
                 text = text.replace(src, dst)
         return text

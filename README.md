@@ -14,6 +14,8 @@
 - 词条可填写“可能译法”（半角逗号分隔）：提示词只提供人工确认译名；回传检出可能误译时自动替换为确认译名（仅已确认词条生效，单字变体自动忽略，1-2 字变体保存时会提醒）
 - 人物昵称/短称单独建条目（kind=person-nickname，note 注明“某某的昵称”）：提取时 LLM 按要求自动拆分，全名与昵称互不干扰
 - “完善信息”先检测昵称（原文搜索验证后新增 person-nickname）、后补可能译法，新昵称同一次就能拿到可能译法；按钮旁两个勾选框“补可能译法/检测昵称”默认全开，可单独关掉任一步
+- 词表记录译名变更历史（zh_history）：修改确认译名后，“多卷修正”会自动生成“旧译名→新译名”替换对，无需重新翻译
+- “多卷修正”tab：可同时添加多卷翻译存档（.translation_state.json）按顺序拼合，按当前词表机器修正后输出 TXT/EPUB，支持先预览替换统计
 - 旧词表中可能译法若是全名的子串（如“范镇”）仍默认视为合法短称不替换；可勾选“替换短称”强制替换为全名
 - 自动分片：按字符数把章节切成小批次发送给 LLM
 - 自动解析返回的 JSON 段落并重组小说
@@ -31,9 +33,10 @@ hangulTranslate/
    ├─ config.py        # 配置
    ├─ llm.py           # OpenAI 兼容客户端
    ├─ book.py          # TXT/EPUB 解析与导出
-   ├─ glossary.py      # 专有名词词表
+   ├─ glossary.py      # 专有名词词表（含译名历史）
+   ├─ merge.py         # 多卷修正：存档重组、拼合、词表修正与输出
    ├─ translator.py    # 分片、翻译、续传、组装
-   └─ gui.py           # CustomTkinter 界面
+   └─ gui.py           # CustomTkinter 界面（词表 + 多卷修正）
 ```
 
 ## 安装
@@ -103,12 +106,14 @@ py main.py --input "D:\books\novel.epub" --output "D:\books\zh" --glossary "glos
 }
 ```
 
-- `kind` 可取：`person`、`place`、`org`、`term`、`title`
+- `kind` 可取：`person`、`person-nickname`、`place`、`org`、`term`、`title`
+- `zh_history`：该词条此前确认过的译名列表（自动记录）；“多卷修正”时用于把旧译文中的旧译名替换为新译名
 - `confirmed` 只作为人工确认标记，翻译时不会因为未确认而跳过词条
 
 ## 断点续传
 
 状态文件自动保存在输出目录下，文件名形如 `.<书名>.translation_state.json`。翻译中断后再次运行同一输入文件、同一输出目录，会自动跳过已完成批次，只补剩余部分。
+这些存档也可在“多卷修正”tab 中按顺序拼合，按最新词表机器修正后重新输出 TXT/EPUB（无需重新翻译）。
 
 ## 大文件建议
 
