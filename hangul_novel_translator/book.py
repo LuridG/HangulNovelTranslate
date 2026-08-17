@@ -184,10 +184,13 @@ def _strip_invisible_chars(text: str) -> str:
 
 
 def _normalize_title(text: str) -> str:
-    """清理章节名：去掉不可见字符与组合装饰符（zalgo 乱码），折叠空白。"""
-    text = _strip_invisible_chars(text)
-    cleaned = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Me"))
-    return re.sub(r"\s+", " ", cleaned).strip()
+    """规整章节名：只去掉零宽不可见字符并折叠空白；保留 zalgo 组合装饰符（原书故意设计的美感）。"""
+    return re.sub(r"\s+", " ", _strip_invisible_chars(text)).strip()
+
+
+def is_decorative_title(title: str) -> bool:
+    """是否装饰性乱码标题（含组合附加符 Mn/Me，如 zalgo 效果）：保持原样、不做 LLM 翻译。"""
+    return any(unicodedata.category(ch) in ("Mn", "Me") for ch in title)
 
 
 def _is_weak_title(title: str) -> bool:
@@ -582,7 +585,7 @@ def parse_epub(path: Path) -> Book:
             chapter_title = heading_title
         else:
             chapter_title = toc_title  # 弱目录标题或空标题
-        chapter_title = _normalize_title(chapter_title)  # 目录标题同样做 zalgo/空白清理
+        chapter_title = _normalize_title(chapter_title)  # 只做零宽/空白清理，保留 zalgo 装饰
 
         blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"])
         paragraphs: list[str] = []

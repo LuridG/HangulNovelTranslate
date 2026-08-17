@@ -310,11 +310,13 @@ class ChapterTitleTest(unittest.TestCase):
         self.assertEqual(ch.paragraphs, ["첫 문단.", "둘째 문단."])
         self.assertNotIn("第", ch.title)
 
-    def test_normalize_title_strips_zalgo(self):
-        from hangul_novel_translator.book import _normalize_title
+    def test_normalize_title_keeps_zalgo(self):
+        from hangul_novel_translator.book import _normalize_title, is_decorative_title
 
         zalgo = "S\u0337\u0308\u0311tr\u0301\u0337ange dream"
-        self.assertEqual(_normalize_title(zalgo), "Strange dream")
+        self.assertEqual(_normalize_title(zalgo), zalgo)  # 保留原书故意设计的 zalgo 装饰
+        self.assertTrue(is_decorative_title(zalgo))
+        self.assertFalse(is_decorative_title("후기"))
         self.assertEqual(_normalize_title("  후기  "), "후기")
 
 

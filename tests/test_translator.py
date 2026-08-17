@@ -246,6 +246,30 @@ class ChapterTitleTranslateTest(unittest.TestCase):
         self.assertEqual(book.chapters[1].title_zh, "第二章译")
         self.assertIn("제1장", fake.messages[1]["content"])
 
+    def test_translate_chapter_titles_skips_decorative(self):
+        from hangul_novel_translator.translator import Translator
+
+        book = Book(
+            title="测试",
+            chapters=[
+                Chapter(0, "제1장", ["가"]),
+                Chapter(1, "S\u0337\u0308tr\u0301\u0337ange dream", ["나"]),
+            ],
+        )
+        fake = TitleFakeLLM(AppConfig())
+        old = translator_module.LLMClient
+        translator_module.LLMClient = lambda cfg: fake
+        try:
+            translator = Translator(AppConfig())
+            translator._translate_chapter_titles(book, Glossary())
+        finally:
+            translator_module.LLMClient = old
+        # 正常标题翻译；zalgo 装饰标题跳过翻译、保留原样
+        self.assertEqual(book.chapters[0].title_zh, "第一章译")
+        self.assertEqual(book.chapters[1].title_zh, "")
+        self.assertEqual(book.chapters[1].display_title, "S\u0337\u0308tr\u0301\u0337ange dream")
+
+
     def test_translate_chapter_titles_keeps_original_on_failure(self):
         from hangul_novel_translator.translator import Translator
 

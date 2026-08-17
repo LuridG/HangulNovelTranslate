@@ -16,6 +16,7 @@ from .book import (
     ParagraphStyle,
     book_to_txt,
     export_epub,
+    is_decorative_title,
     load_book,
     metadata_to_dict,
     strip_inline_markers,
@@ -485,7 +486,9 @@ class Translator:
 
     def _translate_chapter_titles(self, book: Book, glossary: Glossary) -> None:
         """批量翻译章节名：标记好的章节名不随正文翻译，单独成批交给 LLM；失败保留原标题。"""
-        entries = [(i, ch) for i, ch in enumerate(book.chapters) if ch.title]
+        entries = [
+            (i, ch) for i, ch in enumerate(book.chapters) if ch.title and not is_decorative_title(ch.title)
+        ]
         if not entries:
             return
         numbered = "\n".join(f"[{i}] {ch.title}" for i, ch in entries)
