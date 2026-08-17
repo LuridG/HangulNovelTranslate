@@ -56,6 +56,20 @@ def _retry_chunk_config(state: dict, config: AppConfig) -> AppConfig:
         kwargs["max_paragraph_chars"] = state["max_paragraph_chars"]
     return replace(config, **kwargs) if kwargs else config
 
+
+def _sanitize_state_name(stem: str, *, legacy: bool = False) -> str:
+    """存档文件名清洗：保留拉丁/数字/中日韩/韩文，其余换下划线；空名兜底为 book。"""
+    pattern = (
+        r"[^A-Za-z0-9_\-\u4e00-\u9fff]+"
+        if legacy
+        else r"[^A-Za-z0-9_\-\u4e00-\u9fff\uac00-\ud7af]+"
+    )
+    safe = re.sub(pattern, "_", stem or "")
+    safe = re.sub(r"_+", "_", safe)
+    safe = safe.strip("._") or "book"
+    return safe
+
+
 def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
     chunks: list[Chunk] = []
     paragraph_limit = min(config.chunk_chars, config.max_paragraph_chars)
@@ -158,10 +172,18 @@ class Translator:
         self._state_lock = threading.Lock()
 
     # ---------------- 状态 ----------------
-    def _state_path(self, output_dir: Path, source: Path) -> Path:
-        # 一个源文件对应一个状态文件，避免不同书籍互相覆盖。
-        safe = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", source.stem)
-        return Path(output_dir) / f".{safe}.translation_state.json"
+    def _state_path(
+        self,
+        output_dir: Path,
+        source: Path,
+        *,
+        stem: str | None = None,
+        legacy: bool = False,
+    ) -> Path:
+        # 一个源文件对应一个状态文件；stem 用于按“小说名 第X卷”命名，避免不同书籍互相覆盖。
+        source = Path(source)
+        name = _sanitize_state_name(stem or source.stem, legacy=legacy)
+        return Path(output_dir) / f".{name}.translation_state.json"
 
     def _load_state(self, state_path: Path, source: Path) -> dict[str, Any]:
         if not self.config.resume or not state_path.exists():
@@ -244,7 +266,10 @@ class Translator:
             glossary = self._extract_glossary(sample)
 
         chunks = build_chunks(book, self.config)
-        state_path = self._state_path(output_dir, input_path)
+        state_path = self._state_path(output_dir, input_path, stem=output_stem)
+        legacy_path = self._state_path(output_dir, input_path, legacy=True)
+        if not state_path.exists() and legacy_path.exists():
+            state_path = legacy_path
         state = self._load_state(state_path, input_path)
         completed: dict[str, list[str]] = state.setdefault("completed", {})
         failed: dict[str, str] = state.setdefault("failed", {})

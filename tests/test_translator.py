@@ -14,7 +14,13 @@ from hangul_novel_translator import translator as translator_module
 from hangul_novel_translator.book import Book, Chapter, load_book
 from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary
-from hangul_novel_translator.translator import Translator, build_chunks, collect_sample_text, reconcile_paragraphs
+from hangul_novel_translator.translator import (
+    Translator,
+    _sanitize_state_name,
+    build_chunks,
+    collect_sample_text,
+    reconcile_paragraphs,
+)
 
 
 class TranslatorLogicTest(unittest.TestCase):
@@ -177,6 +183,34 @@ class TranslatorRetryTest(unittest.TestCase):
             names = {p.name for p in result.output_paths}
             self.assertIn("某某 第1卷.zh.txt", names)
             self.assertIn("某某 第1卷.zh.epub", names)
+
+    def test_sanitize_state_name_keeps_hangul_and_cjk(self):
+        self.assertEqual(
+            _sanitize_state_name("코즈믹 호러는 어떠세요_ (외전)"),
+            "코즈믹_호러는_어떠세요_외전",
+        )
+        self.assertEqual(_sanitize_state_name("宇宙恐怖怎么样？ 第1卷"), "宇宙恐怖怎么样_第1卷")
+        self.assertEqual(_sanitize_state_name("..??  "), "book")
+        self.assertNotEqual(
+            _sanitize_state_name("코즈믹 호러는 어떠세요_ (외전)"),
+            _sanitize_state_name("코즈믹 호러는 어떠세요_ (특별 외전)"),
+        )
+
+    def test_translate_file_state_named_by_output_stem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            config = AppConfig(resume=True, extract_glossary=False, output_txt=True, output_epub=True)
+            fake = FakeLLM(config)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: fake
+            try:
+                translator = Translator(config)
+                translator.translate_file(src, tmp, Glossary(), output_stem="宇宙恐怖怎么样？ 第1卷")
+            finally:
+                translator_module.LLMClient = old
+            expected = tmp / ".宇宙恐怖怎么样_第1卷.translation_state.json"
+            self.assertTrue(expected.exists(), [p.name for p in tmp.iterdir()])
 
 
 if __name__ == "__main__":
