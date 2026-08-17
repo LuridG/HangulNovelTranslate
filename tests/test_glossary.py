@@ -9,7 +9,9 @@ from hangul_novel_translator.glossary import (
     EXTRACTION_SYSTEM,
     Glossary,
     GlossaryEntry,
+    enrich_glossary,
     extract_more_glossary,
+    payload_to_glossary,
 )
 
 
@@ -149,6 +151,55 @@ class PromptSpecTest(unittest.TestCase):
         self.assertIn("原形", EXTRACTION_MORE_SYSTEM)
         self.assertIn("同一实体", EXTRACTION_MORE_SYSTEM)
         self.assertIn("待确认", EXTRACTION_MORE_SYSTEM)
+
+
+class AlternativesFeatureTest(unittest.TestCase):
+    def test_upsert_preserves_alternatives(self):
+        glossary = Glossary(entries=[GlossaryEntry(ko="준희", zh="俊熙")])
+        glossary.upsert(GlossaryEntry(ko="준희", zh="俊熙", alternatives="俊希,俊曦"))
+        self.assertEqual(glossary.entries[0].alternatives, "俊希,俊曦")
+
+    def test_payload_parses_and_cleans_alts(self):
+        glossary = payload_to_glossary(
+            {
+                "entries": [
+                    {"ko": "준희", "zh": "俊熙", "alts": "俊希, 俊曦,,俊熙,준희,熙"},
+                    {"ko": "제원", "zh": "宰元", "alternatives": ["宰沅", "宰元", "在元"]},
+                ]
+            }
+        )
+        # 去掉与 zh/ko 相同的项、单字项、空项与重复项。
+        self.assertEqual(glossary.entries[0].alternatives, "俊希,俊曦")
+        self.assertEqual(glossary.entries[1].alternatives, "宰沅,在元")
+
+    def test_enrich_glossary_merges_without_source_text(self):
+        existing = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True),
+                GlossaryEntry(ko="제원", zh="宰元", alternatives="宰沅"),
+            ]
+        )
+        llm = FakeLLM(
+            '{"entries":['
+            '{"ko":"준희","zh":"俊熙","alts":"俊希,俊曦,俊希"},'
+            '{"ko":"제원","zh":"宰元","alts":"在元","note":"主角之一"}'
+            "]}"
+        )
+        stats = enrich_glossary(llm, existing)
+        self.assertEqual(stats["updated_alts"], 2)
+        self.assertEqual(stats["updated_notes"], 1)
+        by_ko = {e.ko: e for e in existing.entries}
+        self.assertEqual(by_ko["준희"].alternatives, "俊希,俊曦")
+        self.assertEqual(by_ko["제원"].alternatives, "宰沅,在元")
+        self.assertEqual(by_ko["제원"].note, "主角之一")
+        # 不传原文：用户消息不含任何样章内容。
+        user = llm.calls[0][1]["content"]
+        self.assertNotIn("샘플", user)
+        self.assertIn("ko=준희", user)
+
+    def test_enrich_requires_entries(self):
+        with self.assertRaises(ValueError):
+            enrich_glossary(FakeLLM("{}"), Glossary())
 
 
 if __name__ == "__main__":

@@ -14,6 +14,30 @@ from .utils import extract_json, parse_paragraphs_from_payload
 _MIN_ALTERNATIVE_LEN = 2
 
 
+def _clean_alternatives(value: Any, ko: str = "", zh: str = "") -> str:
+    """把 LLM 返回的可能译法（字符串或列表）规范化为半角逗号分隔字符串。"""
+    if isinstance(value, list):
+        tokens = [str(x) for x in value]
+    else:
+        tokens = str(value or "").split(",")
+    cleaned: list[str] = []
+    for token in tokens:
+        token = token.strip()
+        if not token or token in cleaned:
+            continue
+        if token == ko or token == zh:
+            continue
+        if len(token) < _MIN_ALTERNATIVE_LEN:
+            continue
+        cleaned.append(token)
+    return ",".join(cleaned)
+
+
+def _merge_alternatives(existing: str, incoming: str, ko: str = "", zh: str = "") -> str:
+    """合并已有与新增的可能译法，去重并按长度过滤。"""
+    return _clean_alternatives(existing + "," + incoming, ko=ko, zh=zh)
+
+
 @dataclass
 class GlossaryEntry:
     ko: str
@@ -89,6 +113,7 @@ class Glossary:
                 old.kind = entry.kind
                 old.note = entry.note
                 old.confirmed = entry.confirmed
+                old.alternatives = entry.alternatives
                 return
         self.entries.append(entry)
 
@@ -171,10 +196,14 @@ EXTRACTION_SYSTEM = """你是一名资深的韩语小说中文译者与编辑，
 - 优先使用常见汉字，避免生僻音译字；人名用字要自然、常见。
 - 拿不准时也要给出最合理的译名，并在 note 中注明“待确认”。
 
+【可能译法】
+- 每个词条尽量给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏（“金俊熙”写成“俊熙”）、同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
+- 可能译法用中文、半角逗号分隔；不要包含正确译名本身，也不要包含韩文原词；没有明显易错形式时 alts 留空字符串。
+
 【输出格式】
 只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
-字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注。
-示例：{"entries":[{"ko":"준희","zh":"俊熙","kind":"person","note":""}]}"""
+字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
+示例：{"entries":[{"ko":"준희","zh":"俊熙","kind":"person","note":"","alts":"俊希,俊曦"}]}"""
 
 
 def extract_glossary_with_llm(llm: LLMClient, sample_text: str, limit: int) -> Glossary:
@@ -226,10 +255,14 @@ EXTRACTION_MORE_SYSTEM = """你是一名资深的韩语小说中文译者与编�
 - 中文译名一律使用简体中文，并与现有词表的用字风格保持一致。
 - 优先使用常见汉字，避免生僻音译字；拿不准时也要给出最合理的译名，并在 note 中注明“待确认”。
 
+【可能译法】
+- 每个新词条尽量给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏、同音或形近错别字、前后不一致的写法。
+- 可能译法用中文、半角逗号分隔；不要包含正确译名本身，也不要包含韩文原词；没有明显易错形式时 alts 留空字符串。
+
 【输出格式】
 只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
-字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注。
-示例：{"entries":[{"ko":"제원","zh":"宰元","kind":"person","note":""}]}"""
+字段：ko=韩文原词，zh=中文译名，kind=person|place|org|term|title，note=简短备注，alts=可能译法（半角逗号分隔，可空）。
+示例：{"entries":[{"ko":"제원","zh":"宰元","kind":"person","note":"","alts":"宰沅,在元"}]}"""
 
 
 def extract_more_glossary(
@@ -272,6 +305,75 @@ def extract_more_glossary(
     glossary.sample_chars = len(sample)
     glossary.entries = glossary.entries[:limit]
     return glossary
+
+
+ENRICH_SYSTEM = """你是一名资深的韩语小说中文译者与编辑。用户有一份专有名词词表，需要你为每个词条完善“可能译法”等信息。
+
+【任务】
+对用户给出的每个词条：
+1. 给出 1-3 个“可能译法”（alts）：即翻译时模型最容易写错或写不一致的常见形式，例如漏掉姓氏（“金俊熙”写成“俊熙”）、同音或形近错别字（“俊希”“俊曦”）、前后不一致的写法。
+2. 如果某个词条确实没有明显易错形式，alts 留空字符串。
+3. 不要修改 ko、zh、kind；如果原有 note 为空，可以补充一句简短说明。
+
+【词形规范】
+- 可能译法必须是中文，半角逗号分隔。
+- 不要包含正确译名本身，也不要包含韩文原词。
+
+【输出格式】
+只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
+字段：ko=韩文原词（必须与输入完全一致），zh=中文译名（保持原样），alts=可能译法（半角逗号分隔，可空），note=简短备注（可空）。
+示例：{"entries":[{"ko":"준희","zh":"俊熙","alts":"俊希,俊曦","note":""}]}"""
+
+
+def enrich_glossary(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
+    """把现有词表送回 LLM 完善可能译法等信息（不传原文），返回更新统计。"""
+    entries = glossary.valid_entries()
+    if not entries:
+        raise ValueError("当前没有可完善的词表，请先提取或加载词表")
+
+    lines: list[str] = []
+    for entry in entries:
+        alts = ",".join(entry.alternative_list())
+        lines.append(
+            f"- ko={entry.ko} | zh={entry.zh} | kind={entry.kind} | note={entry.note or ''} | alts={alts}"
+        )
+    user = (
+        "请为下面的每个词条补充可能译法等信息：\n\n"
+        + "\n".join(lines)
+        + "\n\n只输出一个 JSON 对象，每个词条的 ko 必须与输入完全一致。"
+    )
+    messages = [
+        {"role": "system", "content": ENRICH_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    raw_response = llm.chat(messages, temperature=0.1, json_mode=True)
+    try:
+        payload = extract_json(raw_response)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"模型没有返回合法 JSON：{raw_response[:300]}") from exc
+
+    suggested = payload_to_glossary(payload)
+    by_ko = {e.ko: e for e in glossary.entries}
+    updated_alts = 0
+    updated_notes = 0
+    for item in suggested.entries:
+        target = by_ko.get(item.ko)
+        if target is None:
+            continue
+        if item.alternatives:
+            merged = _merge_alternatives(
+                target.alternatives,
+                item.alternatives,
+                ko=target.ko,
+                zh=target.zh,
+            )
+            if merged != target.alternatives:
+                target.alternatives = merged
+                updated_alts += 1
+        if not target.note and item.note:
+            target.note = item.note
+            updated_notes += 1
+    return {"updated_alts": updated_alts, "updated_notes": updated_notes}
 
 
 def payload_to_glossary(payload: Any, source_text: str = "") -> Glossary:
@@ -343,6 +445,11 @@ def _entry_from_item(item: Any) -> GlossaryEntry | None:
             kind=str(item.get("kind", "term")).strip() or "term",
             note=str(item.get("note", "")).strip(),
             confirmed=bool(item.get("confirmed", False)),
+            alternatives=_clean_alternatives(
+                item.get("alts") or item.get("alternatives") or "",
+                ko=str(ko).strip(),
+                zh=str(zh).strip(),
+            ),
         )
 
     if isinstance(item, str):

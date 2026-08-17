@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .book import load_book
 from .config import AppConfig
-from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, extract_glossary_with_llm, extract_more_glossary
+from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
@@ -205,6 +205,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(header, text="专有名词词表", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(header, text="提取词表", width=90, command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(header, text="提取更多词表", width=110, command=self._extract_more_glossary_async).grid(row=0, column=4, padx=4)
+        ctk.CTkButton(header, text="完善信息", width=90, command=self._enrich_glossary_async).grid(row=0, column=5, padx=4)
         ctk.CTkButton(header, text="保存词表", width=90, command=self._save_glossary).grid(row=0, column=2, padx=4)
         ctk.CTkButton(header, text="加载词表", width=90, command=self._load_glossary).grid(row=0, column=3, padx=4)
 
@@ -532,6 +533,46 @@ class App(ctk.CTk):
             )
         else:
             messagebox.showinfo("提示", f"没有新增词条（跳过重复 {skipped} 条）。", parent=self)
+
+    def _enrich_glossary_async(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+            return
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("完善词表中…")
+        self.log("开始完善词表：请求 LLM 补充可能译法等信息（不传原文）")
+        self.worker = threading.Thread(target=self._enrich_worker, daemon=True)
+        self.worker.start()
+
+    def _enrich_worker(self):
+        try:
+            config = self._config_from_ui()
+            llm = LLMClient(config)
+            stats = enrich_glossary(llm, self.glossary)
+            self.after(0, lambda: self._on_enrich_done(stats))
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_enrich_done(self, stats: dict[str, int]):
+        self._refresh_tree()
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("词表完善完成")
+        self.log(
+            f"完善完成：{stats['updated_alts']} 条补充/更新了可能译法，"
+            f"{stats['updated_notes']} 条补充了备注"
+        )
+        messagebox.showinfo(
+            "完成",
+            f"已完善 {stats['updated_alts']} 条词条的可能译法。\n请在表格中复核后确认。",
+            parent=self,
+        )
 
     def _cleanup_duplicates(self):
         if not self.glossary.entries:
