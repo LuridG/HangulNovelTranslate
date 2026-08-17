@@ -226,16 +226,18 @@ class App(ctk.CTk):
         style.configure("Glossary.Treeview", font=tkfont.Font(size=13), rowheight=34)
         style.configure("Glossary.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
 
-        columns = ("ko", "zh", "kind", "note", "alternatives", "confirmed")
+        self.columns = ("ko", "zh", "kind", "note", "alternatives", "confirmed")
+        self.sort_col = ""
+        self.sort_desc = False
         self.tree = ttk.Treeview(
             tree_frame,
-            columns=columns,
+            columns=self.columns,
             show="headings",
             height=18,
             selectmode="extended",
             style="Glossary.Treeview",
         )
-        headings = {
+        self.headings = {
             "ko": "韩文原文",
             "zh": "中文译名",
             "kind": "类型",
@@ -251,8 +253,8 @@ class App(ctk.CTk):
             "alternatives": 130,
             "confirmed": 60,
         }
-        for col in columns:
-            self.tree.heading(col, text=headings[col])
+        for col in self.columns:
+            self.tree.heading(col, text=self.headings[col], command=lambda c=col: self._sort_by(c))
             self.tree.column(
                 col,
                 width=widths[col],
@@ -361,6 +363,38 @@ class App(ctk.CTk):
                 values=(e.ko, e.zh, e.kind, e.note, alts_display, "✓" if e.confirmed else ""),
             )
         self.count_label.configure(text=f"{len(self.glossary.valid_entries())} 条有效词条")
+        if self.sort_col:
+            self._apply_sort()
+
+    def _sort_key(self, col: str, value: str):
+        if col == "confirmed":
+            return (1 if value.strip() == "✓" else 0,)
+        return (value.strip(),)
+
+    def _sort_by(self, col: str):
+        if self.sort_col == col:
+            self.sort_desc = not self.sort_desc
+        else:
+            self.sort_col = col
+            self.sort_desc = False
+        self._apply_sort()
+
+    def _apply_sort(self):
+        if not self.sort_col:
+            return
+        col = self.sort_col
+        items = sorted(
+            self.tree.get_children(""),
+            key=lambda iid: self._sort_key(col, self.tree.set(iid, col)),
+            reverse=self.sort_desc,
+        )
+        for index, iid in enumerate(items):
+            self.tree.move(iid, "", index)
+        for col_name in self.columns:
+            text = self.headings[col_name]
+            if col_name == self.sort_col:
+                text += " ▼" if self.sort_desc else " ▲"
+            self.tree.heading(col_name, text=text)
 
     def _selected_ko(self) -> str | None:
         selection = self.tree.selection()
