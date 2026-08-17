@@ -268,6 +268,32 @@ class FindNicknameTest(unittest.TestCase):
         self.assertEqual(stats["nickname_added"], 0)
         self.assertEqual(stats["nickname_not_found"], 1)
 
+    def test_strips_multi_char_particles_before_search(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔范镇", kind="person", confirmed=True),
+            ]
+        )
+        # “최범진에게/한테”带双字助词：昵称仍只藏在全名里，应判为未找到。
+        llm = FakeLLM('{"entries":[{"ko":"최범진","nicknames":[{"ko":"범진","zh":"范镇"}]}]}')
+        stats = find_nickname_entries(
+            llm, glossary, "최범진에게 선물을 줬다. 최범진한테도 줬다."
+        )
+        self.assertEqual(stats["nickname_added"], 0)
+        self.assertEqual(stats["nickname_not_found"], 1)
+
+    def test_nickname_with_vocative_particle_still_confirmed(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="최범진", zh="崔范镇", kind="person", confirmed=True),
+            ]
+        )
+        # 呼格“범진아”是独立称呼，应判定为确认；全名带助词的形式不影响。
+        llm = FakeLLM('{"entries":[{"ko":"최범진","nicknames":[{"ko":"범진","zh":"范镇"}]}]}')
+        stats = find_nickname_entries(llm, glossary, "범진아, 어서 와. 최범진은 웃었다.")
+        self.assertEqual(stats["nickname_added"], 1)
+        self.assertEqual(stats["nickname_not_found"], 0)
+
     def test_skips_duplicate_or_invalid_nicknames(self):
         glossary = Glossary(
             entries=[

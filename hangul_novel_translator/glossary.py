@@ -390,13 +390,17 @@ def enrich_glossary(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
     return {"updated_alts": updated_alts, "updated_notes": updated_notes}
 
 
-# 韩文常见助词/词尾字符：搜索“昵称是否独立出现”时用于剔除全名带助词的形式。
-_NICKNAME_PARTICLE_CHARS = "이가은는을를과와의도만"
+# 韩文常见助词/词尾（多字形式在前，避免被单字前缀抢先匹配）：
+# 搜索“昵称是否独立出现”时用于剔除“全名+助词”的整体形式。
+_NICKNAME_PARTICLE_PATTERN = (
+    "에게|한테|께서|으로|부터|까지|처럼|같이|만큼|마저|조차|이랑|하고|보다|나마|"
+    "이|가|은|는|을|를|과|와|의|도|만|에|서|로|한|테|께|아|야"
+)
 
 
 def _strip_full_name_occurrences(source: str, full_name: str) -> str:
     """把原文中的“全名+（可选助词）”整体剔除，用于判断昵称是否独立出现。"""
-    pattern = re.compile(re.escape(full_name) + f"[{_NICKNAME_PARTICLE_CHARS}]?")
+    pattern = re.compile(re.escape(full_name) + f"(?:{_NICKNAME_PARTICLE_PATTERN})?")
     return pattern.sub("", source)
 
 
