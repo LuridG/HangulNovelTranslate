@@ -46,6 +46,7 @@ class GlossaryEntry:
     note: str = ""
     confirmed: bool = False
     alternatives: str = ""
+    replace_short: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +60,7 @@ class GlossaryEntry:
             note=str(data.get("note", "")).strip(),
             confirmed=bool(data.get("confirmed", False)),
             alternatives=str(data.get("alternatives", "")).strip(),
+            replace_short=bool(data.get("replace_short", False)),
         )
 
     def alternative_list(self) -> list[str]:
@@ -170,8 +172,13 @@ class Glossary:
             pairs.append((entry.ko, entry.zh))
             if entry.confirmed:
                 for alt in entry.alternative_list():
-                    if len(alt) >= _MIN_ALTERNATIVE_LEN:
-                        pairs.append((alt, entry.zh))
+                    if len(alt) < _MIN_ALTERNATIVE_LEN:
+                        continue
+                    if alt in entry.zh and not entry.replace_short:
+                        # 可能译法是全名字串时视为合法短称/昵称（如“范镇”），
+                        # 未开启“短称替换”则不强制替换，保留文中亲昵的称呼。
+                        continue
+                    pairs.append((alt, entry.zh))
         # 按字符串长度降序，避免短词先替换破坏长词。
         for src, dst in sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True):
             if src and src in text:

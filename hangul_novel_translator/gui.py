@@ -26,7 +26,7 @@ class GlossaryEditDialog(ctk.CTkToplevel):
     def __init__(self, master, entry: GlossaryEntry | None = None):
         super().__init__(master)
         self.title("编辑词条")
-        self.geometry("520x430")
+        self.geometry("560x490")
         self.grab_set()
         self.result: GlossaryEntry | None = None
         self.entry = entry or GlossaryEntry("", "", "term")
@@ -63,8 +63,15 @@ class GlossaryEditDialog(ctk.CTkToplevel):
             row=5, column=0, columnspan=2, padx=12, pady=12, sticky="w"
         )
 
+        self.replace_short_var = tk.BooleanVar(value=self.entry.replace_short)
+        ctk.CTkCheckBox(
+            self,
+            text="替换短称（可能译法中的简称也替换为全名，如“范镇”→“崔范镇”）",
+            variable=self.replace_short_var,
+        ).grid(row=6, column=0, columnspan=2, padx=12, pady=6, sticky="w")
+
         ctk.CTkButton(self, text="确定", command=self._ok).grid(
-            row=6, column=0, columnspan=2, pady=16
+            row=7, column=0, columnspan=2, pady=16
         )
 
     def _ok(self):
@@ -98,6 +105,7 @@ class GlossaryEditDialog(ctk.CTkToplevel):
             note=self.note_var.get().strip(),
             confirmed=self.confirmed_var.get(),
             alternatives=alternatives,
+            replace_short=self.replace_short_var.get(),
         )
         self.destroy()
 
@@ -343,10 +351,13 @@ class App(ctk.CTk):
         for item in self.tree.get_children():
             self.tree.delete(item)
         for e in self.glossary.entries:
+            alts_display = e.alternatives
+            if e.alternatives and e.replace_short:
+                alts_display = "含短称|" + e.alternatives
             self.tree.insert(
                 "",
                 "end",
-                values=(e.ko, e.zh, e.kind, e.note, e.alternatives, "✓" if e.confirmed else ""),
+                values=(e.ko, e.zh, e.kind, e.note, alts_display, "✓" if e.confirmed else ""),
             )
         self.count_label.configure(text=f"{len(self.glossary.valid_entries())} 条有效词条")
 

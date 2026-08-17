@@ -202,5 +202,36 @@ class AlternativesFeatureTest(unittest.TestCase):
             enrich_glossary(FakeLLM("{}"), Glossary())
 
 
+class ShortNameReplacementTest(unittest.TestCase):
+    def test_short_form_alternative_skipped_by_default(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="범진", zh="崔范镇", confirmed=True, alternatives="范镇,范振"),
+            ]
+        )
+        # “范镇”是全名子串 → 视为合法短称，默认不替换；
+        # “范振”是错别字 → 仍替换为全名。
+        text = "范镇来了。范振也来了。"
+        self.assertEqual(glossary.apply_replacements(text), "范镇来了。崔范镇也来了。")
+
+    def test_short_form_replacement_opt_in(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(
+                    ko="범진",
+                    zh="崔范镇",
+                    confirmed=True,
+                    alternatives="范镇",
+                    replace_short=True,
+                ),
+            ]
+        )
+        self.assertEqual(glossary.apply_replacements("范镇来了。"), "崔范镇来了。")
+
+    def test_from_dict_replace_short_default(self):
+        entry = GlossaryEntry.from_dict({"ko": "a", "zh": "b"})
+        self.assertFalse(entry.replace_short)
+
+
 if __name__ == "__main__":
     unittest.main()

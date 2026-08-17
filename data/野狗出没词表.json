@@ -8,252 +8,288 @@
       "zh": "崔俊熙",
       "kind": "person",
       "note": "主角，大一社会福利系学生，欧米伽",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "최범진",
       "zh": "崔范镇",
       "kind": "person",
       "note": "攻，准熙的大父亲/养父，善宰的伴侣，敏韩办事处社长，阿尔法",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "민선재",
       "zh": "闵善宰",
       "kind": "person",
       "note": "受，准熙的生父/小爸爸，范镇的伴侣，多韩大学毕业生",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "최재혁",
       "zh": "崔镇赫",
       "kind": "person",
       "note": "准熙的弟弟，范镇与善宰的亲生二儿子，棒球特长生",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "알파",
       "zh": "Alpha",
       "kind": "term",
       "note": "ABO世界观设定性别",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "오메가",
       "zh": "Omega",
       "kind": "term",
       "note": "ABO世界观设定性别",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "베타",
       "zh": "Beta",
       "kind": "term",
       "note": "ABO世界观设定性别",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "다한대학교",
       "zh": "多韩大学",
       "kind": "org",
       "note": "准熙与善宰就读的大学",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "다한대",
       "zh": "多韩大",
       "kind": "org",
       "note": "多韩大学简称",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "민한 심부름센터",
       "zh": "敏韩办事处",
       "kind": "org",
       "note": "范镇经营的跑腿/清障事务所",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "민한 인력 사무실",
       "zh": "敏韩人力事务所",
       "kind": "org",
       "note": "范镇旗下机构",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "민한",
       "zh": "敏韩",
       "kind": "org",
       "note": "范镇名下产业统称/招牌名",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "박진호",
       "zh": "朴镇浩",
       "kind": "person",
       "note": "社福系复学学长，志愿服务社团负责人，阿尔法",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "우인",
       "zh": "佑仁",
       "kind": "person",
       "note": "准熙的大学同系好友",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "박형우",
       "zh": "朴亨宇",
       "kind": "person",
       "note": "体育系大一学生，教养课第3组成员",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "유선태",
       "zh": "柳善泰",
       "kind": "person",
       "note": "体育系大一学生，教养课第3组成员",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "부귀",
       "zh": "富贵",
       "kind": "person",
       "note": "准熙在后山喂养的流浪狗之一（白毛米耳）",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "영달",
       "zh": "荣达",
       "kind": "person",
       "note": "准熙在后山喂养的流浪狗之一（背部带斑点）",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "사회복지학과",
       "zh": "社会福利系",
       "kind": "org",
       "note": "准熙所在的大学院系",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "사복과",
       "zh": "社福系",
       "kind": "org",
       "note": "社会福利系简称",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "체육과",
       "zh": "体育系",
       "kind": "org",
       "note": "多韩大学体育学科，阿尔法聚集地",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "조화",
-      "zh": "朝花 (或调和)",
+      "zh": "朝花",
       "kind": "place",
       "note": "多韩大学校内咖啡厅名",
-      "confirmed": false
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "이승호",
       "zh": "李承浩",
       "kind": "person",
       "note": "范镇信任的办事处小弟，被指派给善宰做专属司机",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "성호",
       "zh": "成浩",
       "kind": "person",
       "note": "范镇常对李承浩（이승호）叫错的名字",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "지원",
       "zh": "智媛",
       "kind": "person",
       "note": "社福系同学，志愿服务社团成员，暗恋朴镇浩",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "정민",
       "zh": "正民",
       "kind": "person",
       "note": "1.社福系同学；2.小说《想起你时》的主角名",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "인우",
       "zh": "仁佑",
       "kind": "person",
       "note": "准熙自幼最好的朋友（名字与佑仁前后颠倒）",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "김한성",
       "zh": "金韩成",
       "kind": "person",
       "note": "体育系大一学生，给准熙发短信者",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "독서와 말하기",
       "zh": "《阅读与表达》",
       "kind": "term",
       "note": "多韩大学教养科目课程名",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "너를 떠올리면",
       "zh": "《想起你时》",
       "kind": "title",
       "note": "教养课教授编写的小说教材",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "우성 알파",
       "zh": "优质阿尔法",
       "kind": "term",
       "note": "显性/优质阿尔法",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "열성 알파",
       "zh": "劣质阿尔法",
       "kind": "term",
       "note": "隐性/劣质阿尔法",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     },
     {
       "ko": "우성",
       "zh": "优质",
       "kind": "term",
       "note": "ABO阶级属性设定",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "열성",
       "zh": "劣质",
       "kind": "term",
       "note": "ABO阶级属性设定",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "확마씨 사장",
       "zh": "削你老板",
       "kind": "title",
       "note": "合作方给范镇取的绰号（源于其口头禅확씨/확마）",
-      "confirmed": true
+      "confirmed": true,
+      "alternatives": ""
     },
     {
       "ko": "체육 경영",
       "zh": "体育经营专业",
       "kind": "org",
       "note": "体育系细分专业方向",
-      "confirmed": false
+      "confirmed": false,
+      "alternatives": ""
     }
   ]
 }
