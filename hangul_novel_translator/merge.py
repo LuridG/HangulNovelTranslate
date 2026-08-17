@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .book import Book, Chapter, book_to_txt, export_epub, load_book
+from .book import Book, Chapter, ParagraphStyle, book_to_txt, export_epub, load_book
 from .config import AppConfig
 from .glossary import Glossary
 from .translator import build_chunks
@@ -62,15 +62,19 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
     chapters: list[Chapter] = []
     for chapter in book.chapters:
         paragraphs: list[str] = []
+        styles: list[ParagraphStyle | None] = []
         for chunk in sorted(by_chapter.get(chapter.index, []), key=lambda c: c.chunk_index):
             paras = completed.get(chunk.id)
             if isinstance(paras, list):
                 paragraphs.extend(str(p) for p in paras)
+                styles.extend(chunk.styles[: len(paras)])
             else:
                 paragraphs.extend(chunk.paragraphs)
+                styles.extend(chunk.styles[: len(chunk.paragraphs)])
         if not paragraphs:
             paragraphs = chapter.paragraphs
-        chapters.append(Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id))
+            styles = list(chapter.styles)
+        chapters.append(Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id, styles))
     return Book(title=book.title, chapters=chapters, source_path=book.source_path)
 
 
@@ -82,10 +86,19 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
         chapters.append(Chapter(len(chapters), f"{prefix}第{index}卷", []))
         for chapter in book.chapters:
             chapters.append(
-                Chapter(len(chapters), chapter.title, chapter.paragraphs, chapter.source_id)
+                Chapter(
+                    len(chapters),
+                    chapter.title,
+                    chapter.paragraphs,
+                    chapter.source_id,
+                    list(chapter.styles),
+                )
             )
     titles = [b.title for b in books if b.title]
-    return Book(title=title.strip() or "、".join(titles), chapters=chapters)
+    merged = Book(title=title.strip() or "、".join(titles), chapters=chapters)
+    if books:
+        merged.metadata = dict(books[0].metadata or {})
+    return merged
 
 
 def preview_fix(book: Book, glossary: Glossary) -> dict[str, int]:

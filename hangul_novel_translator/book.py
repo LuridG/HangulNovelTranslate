@@ -12,11 +12,28 @@ from typing import Iterable
 
 
 @dataclass
+class BlockStyle:
+    """一个块级元素（段落/标题/列表项等）的样式信息。"""
+    tag: str
+    klass: str = ""
+    style: str = ""
+    attrs: dict = field(default_factory=dict)
+
+
+@dataclass
+class ParagraphStyle:
+    """段落样式：自身块样式 + 父容器链（用于还原如 div.quote p 这类上下文样式）。"""
+    block: BlockStyle | None = None
+    ancestors: list[BlockStyle] = field(default_factory=list)
+
+
+@dataclass
 class Chapter:
     index: int
     title: str
     paragraphs: list[str] = field(default_factory=list)
     source_id: str = ""
+    styles: list[ParagraphStyle | None] = field(default_factory=list)
 
     @property
     def text(self) -> str:
@@ -169,6 +186,97 @@ def _has_skip_text_marker(paragraphs: list[str]) -> bool:
     return any(_is_skip_marker_line(p) for p in paragraphs)
 
 
+def _collect_block_style(tag) -> BlockStyle:
+    klass = " ".join(tag.get("class") or [])
+    style = (tag.get("style") or "").strip()
+    attrs: dict = {}
+    for key in ("id", "lang", "align", "title"):
+        value = tag.get(key)
+        if value:
+            attrs[key] = str(value)
+    return BlockStyle(tag=tag.name, klass=klass, style=style, attrs=attrs)
+
+
+def _ancestor_styles(node) -> list[BlockStyle]:
+    """收集块元素到 body 之间的容器样式链（div/section/ul 等带 class/style 的祖先）。"""
+    chain: list[BlockStyle] = []
+    parent = getattr(node, "parent", None)
+    while parent is not None and getattr(parent, "name", None) not in (None, "body", "html", "[document]"):
+        name = getattr(parent, "name", "") or ""
+        if name in (
+            "div",
+            "section",
+            "article",
+            "aside",
+            "main",
+            "blockquote",
+            "ul",
+            "ol",
+            "table",
+            "thead",
+            "tbody",
+            "tr",
+            "td",
+            "th",
+        ):
+            style = _collect_block_style(parent)
+            if style.klass or style.style or style.attrs:
+                chain.append(style)
+        parent = getattr(parent, "parent", None)
+    chain.reverse()
+    return chain
+
+
+def _paragraph_style_for(block) -> ParagraphStyle | None:
+    block_style = _collect_block_style(block)
+    ancestors = _ancestor_styles(block)
+    if (
+        block_style.tag == "p"
+        and not block_style.klass
+        and not block_style.style
+        and not block_style.attrs
+        and not ancestors
+    ):
+        return None
+    return ParagraphStyle(block=block_style, ancestors=ancestors)
+
+
+def _css_urls(css: str) -> list[str]:
+    return re.findall(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", css)
+
+
+def _collect_css_resources(book) -> list[dict]:
+    """收集原书 CSS 文件、字体与 CSS 引用的图片，供导出时原样复用。"""
+    from ebooklib import ITEM_FONT, ITEM_IMAGE, ITEM_STYLE
+
+    resources: list[dict] = []
+    added_names: set[str] = set()
+    css_texts: list[str] = []
+    for item in book.get_items():
+        if item.get_type() == ITEM_STYLE:
+            content = bytes(item.get_content())
+            resources.append({"name": item.get_name(), "content": content})
+            added_names.add(item.get_name())
+            try:
+                css_texts.append(content.decode("utf-8", errors="ignore"))
+            except Exception:
+                pass
+    referenced: set[str] = set()
+    for css in css_texts:
+        for url in _css_urls(css):
+            referenced.add(_href_basename(url))
+    for item in book.get_items():
+        if item.get_name() in added_names:
+            continue
+        if item.get_type() == ITEM_FONT:
+            resources.append({"name": item.get_name(), "content": bytes(item.get_content())})
+            added_names.add(item.get_name())
+        elif item.get_type() == ITEM_IMAGE and _href_basename(item.get_name()) in referenced:
+            resources.append({"name": item.get_name(), "content": bytes(item.get_content())})
+            added_names.add(item.get_name())
+    return resources
+
+
 def parse_epub(path: Path) -> Book:
     try:
         from bs4 import BeautifulSoup
@@ -197,6 +305,9 @@ def parse_epub(path: Path) -> Book:
 
     skip_filename_markers = ("cover", "copyright", "toc", "titlepage", "colophon", "frontmatter", "backmatter")
 
+    doc_inline_css: dict[str, list[str]] = {}
+    css_resources = _collect_css_resources(book)
+
     for index, idref in enumerate(spine_ids):
         item_id = idref[0] if isinstance(idref, (tuple, list)) else idref
         item = items.get(item_id)
@@ -204,6 +315,9 @@ def parse_epub(path: Path) -> Book:
             continue
         content = _decode_bytes(item.get_content())
         soup = BeautifulSoup(content, "html.parser")
+        inline_css = [st.get_text() for st in soup.find_all("style")]
+        if inline_css:
+            doc_inline_css.setdefault(item_id, []).extend(inline_css)
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 
@@ -220,6 +334,7 @@ def parse_epub(path: Path) -> Book:
 
         blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"])
         paragraphs: list[str] = []
+        styles: list[ParagraphStyle | None] = []
         seen: set[str] = set()
         for block in blocks:
             text = _strip_invisible_chars(block.get_text(" ", strip=True))
@@ -227,6 +342,7 @@ def parse_epub(path: Path) -> Book:
                 continue
             seen.add(text)
             paragraphs.append(text)
+            styles.append(_paragraph_style_for(block))
 
         if not paragraphs:
             body = soup.body or soup
@@ -239,9 +355,16 @@ def parse_epub(path: Path) -> Book:
             continue
 
         if paragraphs:
-            chapters.append(Chapter(index, chapter_title, paragraphs, source_id=item_id))
+            chapters.append(
+                Chapter(index, chapter_title, paragraphs, source_id=item_id, styles=styles)
+            )
 
-    return Book(title=title, chapters=chapters, source_path=path)
+    result = Book(title=title, chapters=chapters, source_path=path)
+    if doc_inline_css:
+        result.metadata["doc_inline_css"] = doc_inline_css
+    if css_resources:
+        result.metadata["css_resources"] = css_resources
+    return result
 
 
 def load_book(path: Path) -> Book:
@@ -270,6 +393,69 @@ def book_to_txt(book: Book, path: Path, encoding: str = "utf-8") -> None:
     path.write_text("\n".join(lines), encoding=encoding)
 
 
+def _mime_for_name(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    return {
+        ".css": "text/css",
+        ".ttf": "font/ttf",
+        ".otf": "font/otf",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".eot": "application/vnd.ms-fontobject",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
+
+
+def _style_attrs(style: BlockStyle) -> str:
+    parts: list[str] = []
+    if style.klass:
+        parts.append(f'class="{html.escape(style.klass, quote=True)}"')
+    if style.style:
+        parts.append(f'style="{html.escape(style.style, quote=True)}"')
+    for key, value in style.attrs.items():
+        parts.append(f'{html.escape(key, quote=True)}="{html.escape(str(value), quote=True)}"')
+    return " ".join(parts)
+
+
+def _block_to_html(style: ParagraphStyle | None, text: str) -> str:
+    """按段落样式还原 HTML：无样式输出普通 <p>，有样式则还原标签/class/内联 style。"""
+    if style is None or style.block is None:
+        return f"<p>{html.escape(text)}</p>"
+    attrs = _style_attrs(style.block)
+    opening = f"<{style.block.tag} {attrs}>" if attrs else f"<{style.block.tag}>"
+    return f"{opening}{html.escape(text)}</{style.block.tag}>"
+
+
+def _ancestors_key(style: ParagraphStyle | None):
+    """父容器链的唯一键：连续相同键的段落合并到同一容器里，避免每个段落重复开 div。"""
+    if style is None or not style.ancestors:
+        return None
+    return tuple(
+        (a.tag, a.klass, a.style, tuple(sorted(a.attrs.items()))) for a in style.ancestors
+    )
+
+
+def _ancestors_open(style: ParagraphStyle | None) -> str:
+    if style is None:
+        return ""
+    parts: list[str] = []
+    for a in style.ancestors:
+        attrs = _style_attrs(a)
+        parts.append(f"<{a.tag} {attrs}>" if attrs else f"<{a.tag}>")
+    return "".join(parts)
+
+
+def _ancestors_close(style: ParagraphStyle | None) -> str:
+    if style is None:
+        return ""
+    return "".join(f"</{a.tag}>" for a in reversed(style.ancestors))
+
+
 def export_epub(book: Book, path: Path, source_title: str | None = None) -> None:
     try:
         from ebooklib import epub
@@ -282,15 +468,67 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
     out.set_title(source_title or book.title)
     out.set_language("zh")
 
-    chapter_items = []
+    metadata = book.metadata or {}
+    css_resources: list[dict] = metadata.get("css_resources") or []
+    doc_inline_css: dict[str, list[str]] = metadata.get("doc_inline_css") or {}
+
+    css_names = {
+        str(res["name"])
+        for res in css_resources
+        if str(res["name"]).lower().endswith(".css")
+    }
+
+    chapter_items: list = []
     for i, chapter in enumerate(book.chapters, start=1):
         file_name = f"chap_{i:04d}.xhtml"
         item = epub.EpubHtml(title=chapter.title, file_name=file_name, lang="zh")
+        for name in sorted(css_names):
+            item.add_link(href=name, rel="stylesheet", type="text/css")
+        inline_styles = doc_inline_css.get(chapter.source_id) or []
+        if inline_styles:
+            # 原文档的内联 <style> 转成独立 CSS 项，只挂到对应章节。
+            inline_name = f"Styles/inline_{i:04d}.css"
+            item.add_link(href=inline_name, rel="stylesheet", type="text/css")
+            css_resources.append(
+                {
+                    "name": inline_name,
+                    "content": ("\n".join(inline_styles)).encode("utf-8"),
+                }
+            )
         body = [f"<h1>{html.escape(chapter.title)}</h1>"]
-        body.extend(f"<p>{html.escape(p)}</p>" for p in chapter.paragraphs)
+        prev_key = None
+        prev_style: ParagraphStyle | None = None
+        first = True
+        for pi, paragraph in enumerate(chapter.paragraphs):
+            style = chapter.styles[pi] if pi < len(chapter.styles) else None
+            key = _ancestors_key(style)
+            if key != prev_key:
+                if not first and prev_style is not None:
+                    body.append(_ancestors_close(prev_style))
+                if style is not None:
+                    body.append(_ancestors_open(style))
+                prev_key = key
+                prev_style = style
+            body.append(_block_to_html(style, paragraph))
+            first = False
+        if not first and prev_style is not None:
+            body.append(_ancestors_close(prev_style))
+
         item.content = "".join(body)
         out.add_item(item)
         chapter_items.append(item)
+
+    for res in css_resources:
+        name = str(res["name"])
+        if not any(it.file_name == name for it in out.items):
+            out.add_item(
+                epub.EpubItem(
+                    uid=f"res-{len(out.items)}",
+                    file_name=name,
+                    media_type=_mime_for_name(name),
+                    content=res["content"],
+                )
+            )
 
     out.toc = tuple(
         epub.Link(item.file_name, item.title, item.file_name) for item in chapter_items

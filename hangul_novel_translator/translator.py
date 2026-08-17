@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .book import Book, Chapter, book_to_txt, export_epub, load_book
+from .book import Book, Chapter, ParagraphStyle, book_to_txt, export_epub, load_book
 from .config import AppConfig
 from .glossary import Glossary
 from .llm import LLMClient
@@ -31,6 +31,7 @@ class Chunk:
     chapter_title: str
     chunk_index: int
     paragraphs: list[str]
+    styles: list[ParagraphStyle | None] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -74,16 +75,19 @@ def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
     chunks: list[Chunk] = []
     paragraph_limit = min(config.chunk_chars, config.max_paragraph_chars)
     for chapter in book.chapters:
-        pieces: list[str] = []
-        for paragraph in chapter.paragraphs:
-            pieces.extend(split_paragraph_smart(paragraph, paragraph_limit))
+        pieces: list[tuple[str, ParagraphStyle | None]] = []
+        for index, paragraph in enumerate(chapter.paragraphs):
+            style = chapter.styles[index] if index < len(chapter.styles) else None
+            for piece in split_paragraph_smart(paragraph, paragraph_limit):
+                pieces.append((piece, style))
 
         current: list[str] = []
+        current_styles: list[ParagraphStyle | None] = []
         current_chars = 0
         chunk_index = 0
 
         def flush() -> None:
-            nonlocal current, current_chars, chunk_index
+            nonlocal current, current_styles, current_chars, chunk_index
             if current:
                 chunks.append(
                     Chunk(
@@ -92,16 +96,19 @@ def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
                         chapter_title=chapter.title,
                         chunk_index=chunk_index,
                         paragraphs=current,
+                        styles=current_styles,
                     )
                 )
                 chunk_index += 1
                 current = []
+                current_styles = []
                 current_chars = 0
 
-        for piece in pieces:
+        for piece, style in pieces:
             if current and current_chars + len(piece) + 1 > config.chunk_chars:
                 flush()
             current.append(piece)
+            current_styles.append(style)
             current_chars += len(piece) + 1
         flush()
     return chunks
@@ -465,16 +472,26 @@ class Translator:
         translated_chapters: list[Chapter] = []
         for chapter in book.chapters:
             paragraphs: list[str] = []
+            styles: list[ParagraphStyle | None] = []
             for chunk in sorted(by_chapter.get(chapter.index, []), key=lambda c: c.chunk_index):
                 if chunk.id in completed:
-                    paragraphs.extend(completed[chunk.id])
+                    paras = completed[chunk.id]
+                    paragraphs.extend(paras)
+                    styles.extend(chunk.styles[: len(paras)])
                 else:
                     # 失败/未完成块保留原文，便于人工识别。
                     paragraphs.extend(chunk.paragraphs)
+                    styles.extend(chunk.styles[: len(chunk.paragraphs)])
             if not paragraphs:
                 paragraphs = chapter.paragraphs
+                styles = list(chapter.styles)
             translated_chapters.append(
-                Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id)
+                Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id, styles)
             )
 
-        return Book(title=book.title, chapters=translated_chapters, source_path=book.source_path)
+        return Book(
+            title=book.title,
+            chapters=translated_chapters,
+            source_path=book.source_path,
+            metadata=book.metadata,
+        )

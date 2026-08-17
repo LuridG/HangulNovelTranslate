@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hangul_novel_translator.book import (
+    export_epub,
     parse_epub,
     parse_txt,
     _has_skip_text_marker,
@@ -108,6 +109,78 @@ class EpubParsingRegressionTest(unittest.TestCase):
         self.assertEqual(len(book.chapters), 1)
         self.assertEqual(book.chapters[0].title, "4부")
         self.assertIn("한 차례 막았다.", book.chapters[0].paragraphs)
+
+
+@unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
+class EpubStylePreservationTest(unittest.TestCase):
+    def _make_styled_book(self, tmp: Path) -> Path:
+        src = epub_lib.EpubBook()
+        src.set_identifier("style-0001")
+        src.set_title("스타일 테스트")
+        src.set_language("ko")
+        src.add_item(
+            epub_lib.EpubItem(
+                uid="css1",
+                file_name="Styles/main.css",
+                media_type="text/css",
+                content=b".center { text-align: center; }",
+            )
+        )
+        body = (
+            "<body>"
+            "<h1>제1장</h1>"
+            '<p class="center">중앙 정렬</p>'
+            "<p>일반 문단</p>"
+            "<blockquote><p>인용문</p></blockquote>"
+            '<div class="letter"><p>편지</p></div>'
+            "</body>"
+        )
+        chapter = epub_lib.EpubHtml(uid="chap.xhtml", title="", file_name="Text/chap.xhtml", lang="ko")
+        chapter.content = (
+            "<html><head><link rel='stylesheet' type='text/css' href='../Styles/main.css'/></head>"
+            + body
+            + "</html>"
+        )
+        src.add_item(chapter)
+        src.toc = (epub_lib.Link("Text/chap.xhtml", "제1장", "chap.xhtml"),)
+        src.add_item(epub_lib.EpubNcx())
+        src.add_item(epub_lib.EpubNav())
+        src.spine = ["nav", chapter]
+        path = tmp / "styled.epub"
+        epub_lib.write_epub(str(path), src)
+        return path
+
+    def test_parse_keeps_block_styles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._make_styled_book(Path(tmp))
+            book = parse_epub(path)
+        chapter = book.chapters[-1]  # 排除 nav 页
+        styles = dict(zip(chapter.paragraphs, chapter.styles))
+        self.assertEqual(styles["중앙 정렬"].block.klass, "center")
+        self.assertEqual(styles["인용문"].block.tag, "blockquote")
+        self.assertEqual([a.klass for a in styles["편지"].ancestors], ["letter"])
+        self.assertEqual(book.metadata["css_resources"][0]["name"], "Styles/main.css")
+
+    def test_export_restores_styles_and_css(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            path = self._make_styled_book(tmp)
+            book = parse_epub(path)
+            out = tmp / "out.epub"
+            export_epub(book, out)
+            with zipfile.ZipFile(out) as zf:
+                names = set(zf.namelist())
+                self.assertTrue(any(n.endswith("Styles/main.css") for n in names))
+                chapter_html = ""
+                for n in names:
+                    if n.endswith(".xhtml") and "nav" not in n:
+                        chapter_html += zf.read(n).decode("utf-8")
+                self.assertIn('class="center"', chapter_html)
+                self.assertIn("<blockquote>", chapter_html)
+                self.assertIn('class="letter"', chapter_html)
+                self.assertIn('rel="stylesheet"', chapter_html)
 
 
 class UtilsTest(unittest.TestCase):
