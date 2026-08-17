@@ -183,6 +183,101 @@ class EpubStylePreservationTest(unittest.TestCase):
                 self.assertIn('rel="stylesheet"', chapter_html)
 
 
+
+@unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
+class EpubInlineFormatTest(unittest.TestCase):
+    def _make_book(self, tmp: Path) -> Path:
+        src = epub_lib.EpubBook()
+        src.set_identifier("inline-0001")
+        src.set_title("인라인 테스트")
+        src.set_language("ko")
+        src.add_item(
+            epub_lib.EpubItem(
+                uid="pic1",
+                file_name="Images/p1.png",
+                media_type="image/png",
+                content=b"\x89PNG-fake",
+            )
+        )
+        body = (
+            "<body>"
+            "<h1>제1장</h1>"
+            '<p>안녕 <b>세상</b> <span style="color:red">빨강</span>'
+            ' <a href="#fn1">[1]</a></p>'
+            '<p><img src="../Images/p1.png" alt="그림"/></p>'
+            '<aside id="fn1"><p>주석 내용.</p></aside>'
+            "</body>"
+        )
+        chapter = epub_lib.EpubHtml(
+            uid="chap.xhtml", title="", file_name="Text/chap.xhtml", lang="ko"
+        )
+        chapter.content = "<html><head></head>" + body + "</html>"
+        src.add_item(chapter)
+        src.toc = (epub_lib.Link("Text/chap.xhtml", "제1장", "chap.xhtml"),)
+        src.add_item(epub_lib.EpubNcx())
+        src.add_item(epub_lib.EpubNav())
+        src.spine = ["nav", chapter]
+        path = tmp / "inline.epub"
+        epub_lib.write_epub(str(path), src)
+        return path
+
+    def test_parse_keeps_inline_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book = parse_epub(self._make_book(Path(tmp)))
+        chapter = book.chapters[-1]
+        joined = "\n".join(chapter.paragraphs)
+        self.assertIn("\u27e6b\u27e7세상\u27e6/b\u27e7", joined)
+        self.assertIn("\u27e6s:color:red\u27e7빨강\u27e6/s\u27e7", joined)
+        self.assertIn("\u27e6fn:fn1\u27e7", joined)
+        self.assertIn("\u27e6img:Images/p1.png\u27e7", joined)
+        names = [r["name"] for r in book.metadata.get("images", [])]
+        self.assertIn("Images/p1.png", names)
+
+    def test_export_restores_inline_markers(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            book = parse_epub(self._make_book(tmp))
+            out = tmp / "out.epub"
+            export_epub(book, out)
+            with zipfile.ZipFile(out) as zf:
+                names = set(zf.namelist())
+                self.assertTrue(any(n.endswith("Images/p1.png") for n in names))
+                html = ""
+                for n in names:
+                    if n.endswith(".xhtml") and "nav" not in n:
+                        html += zf.read(n).decode("utf-8")
+                self.assertIn("<b>세상</b>", html)
+                self.assertIn('<span style="color:red">빨강</span>', html)
+                self.assertIn('<a href="#fn1">', html)
+                self.assertIn('<img src="Images/p1.png"', html)
+
+    def test_strip_inline_markers(self):
+        from hangul_novel_translator.book import strip_inline_markers
+
+        text = "안녕 \u27e6b\u27e7세상\u27e6/b\u27e7 \u27e6img:Images/p1.png\u27e7"
+        self.assertEqual(strip_inline_markers(text), "안녕 세상 【插图】")
+
+    def test_metadata_json_round_trip(self):
+        import json as jsonlib
+
+        from hangul_novel_translator.book import metadata_from_dict, metadata_to_dict
+
+        meta = {
+            "css_resources": [{"name": "Styles/main.css", "content": b".center{}"}],
+            "images": [{"name": "Images/p1.png", "content": b"\x89PNG"}],
+            "doc_inline_css": {"chap.xhtml": ["p { color: red; }"]},
+        }
+        dumped = jsonlib.dumps(metadata_to_dict(meta), ensure_ascii=False)
+        restored = metadata_from_dict(jsonlib.loads(dumped))
+        self.assertEqual(restored["css_resources"][0]["content"], b".center{}")
+        self.assertEqual(restored["images"][0]["content"], b"\x89PNG")
+        self.assertEqual(
+            restored["doc_inline_css"], {"chap.xhtml": ["p { color: red; }"]}
+        )
+
+
 class UtilsTest(unittest.TestCase):
     def test_extract_json_code_block(self):
         self.assertEqual(extract_json('```json\n{"a": 1}\n```'), {"a": 1})

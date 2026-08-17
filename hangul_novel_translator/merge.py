@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .book import Book, Chapter, ParagraphStyle, book_to_txt, export_epub, load_book
+from .book import (
+    Book,
+    Chapter,
+    ParagraphStyle,
+    _href_basename,
+    book_to_txt,
+    export_epub,
+    load_book,
+    metadata_from_dict,
+)
 from .config import AppConfig
 from .glossary import Glossary
 from .translator import build_chunks
@@ -50,6 +60,9 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
     if not source.exists():
         raise ValueError(f"存档对应的原书不存在：{source}")
     book = load_book(source)
+    restored = metadata_from_dict(data.get("metadata"))
+    if restored:
+        book.metadata = restored
     cfg = _chunk_config(data, config)
     completed = data.get("completed") or {}
     if not isinstance(completed, dict):
@@ -75,29 +88,178 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
             paragraphs = chapter.paragraphs
             styles = list(chapter.styles)
         chapters.append(Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id, styles))
-    return Book(title=book.title, chapters=chapters, source_path=book.source_path)
+    return Book(
+            title=book.title,
+            chapters=chapters,
+            source_path=book.source_path,
+            metadata=book.metadata,
+        )
+
+
+
+def _as_bytes(content: Any) -> bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, bytearray):
+        return bytes(content)
+    return str(content).encode("utf-8")
+
+
+def _rewrite_css_urls(css_text: str, new_css_name: str, renamed: dict[str, str]) -> str:
+    """CSS 文件被改名时，把文件内 url() 相对引用改写到新路径（保持与改名前一致的相对位置）。"""
+    css_dir = posixpath.dirname(new_css_name)
+
+    def repl(match) -> str:
+        raw = match.group(1).strip()
+        url = raw.strip("'\"")
+        if url.lower().startswith(("data:", "http://", "https://")):
+            return match.group(0)
+        target = renamed.get(_href_basename(url))
+        if not target:
+            return match.group(0)
+        rel = posixpath.relpath(target, start=css_dir)
+        return f"url('{rel}')"
+
+    return re.sub(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", repl, css_text)
+
+
+_IMAGE_MARKER_RE = re.compile("\u27e6img:([^\u27e7]*)\u27e7")
+
+
+def _rewrite_image_markers(text: str, image_map: dict[str, str]) -> str:
+    return _IMAGE_MARKER_RE.sub(
+        lambda m: f"\u27e6img:{image_map.get(m.group(1), m.group(1))}\u27e7", text
+    )
+
+
+def _merge_static_resources(books: list[Book]):
+    """把多卷的 CSS/图片资源合并进同一包：
+    - 同名且内容相同 → 去重共享（同一本书各卷通常同套资源）；
+    - 同名但内容不同 → 同目录改名（CSS 内 url() 同步改写；正文里的 ⟦img:旧名⟧
+      由调用方按 image_map 改写）。
+    返回 (css_resources, images, doc_inline_css, volume_css, volume_image_maps)，
+    其中 volume_image_maps 是每卷各自的图片改名映射（只用于改写该卷正文标记）。"""
+    resources: list[dict] = []
+    by_name: dict[str, bytes] = {}
+    by_base: dict[str, list[tuple[str, bytes]]] = {}
+    doc_inline_css: dict[str, list[str]] = {}
+    volume_image_maps: list[dict[str, str]] = []
+    volume_css_list: list[list[str]] = []
+
+    for volume_index, book in enumerate(books, start=1):
+        image_map: dict[str, str] = {}
+        metadata = book.metadata or {}
+        raw = list(metadata.get("css_resources") or []) + list(metadata.get("images") or [])
+        target: dict[str, str] = {}
+        renamed: dict[str, str] = {}
+        for res in raw:
+            name = str(res.get("name", ""))
+            if not name:
+                continue
+            content = _as_bytes(res.get("content", b""))
+            base = _href_basename(name)
+            reused = next(
+                (full for full, data in by_base.get(base, []) if data == content), None
+            )
+            if reused:
+                target[name] = reused
+                continue
+            candidate = name
+            if candidate in by_name:
+                parent = posixpath.dirname(name)
+                stem = posixpath.splitext(posixpath.basename(name))[0]
+                suffix = posixpath.splitext(name)[1]
+                candidate = posixpath.join(parent, f"{stem}_v{volume_index}{suffix}")
+                guard = 2
+                while candidate in by_name:
+                    candidate = posixpath.join(
+                        parent, f"{stem}_v{volume_index}_{guard}{suffix}"
+                    )
+                    guard += 1
+            target[name] = candidate
+            by_name[candidate] = content
+            by_base.setdefault(base, []).append((candidate, content))
+            if candidate != name:
+                renamed[base] = candidate
+
+        volume_css: list[str] = []
+        for res in raw:
+            name = str(res.get("name", ""))
+            if not name:
+                continue
+            content = _as_bytes(res.get("content", b""))
+            final = target.get(name, name)
+            if name.lower().endswith(".css") and final != name:
+                css_text = content.decode("utf-8", errors="ignore")
+                css_text = _rewrite_css_urls(css_text, final, renamed)
+                content = css_text.encode("utf-8")
+            if not any(r["name"] == final for r in resources):
+                resources.append({"name": final, "content": content})
+            if name.lower().endswith(".css") and final not in volume_css:
+                volume_css.append(final)
+
+        for sid, styles in (metadata.get("doc_inline_css") or {}).items():
+            doc_inline_css[f"v{volume_index}:{sid}"] = list(styles)
+        for res in metadata.get("images") or []:
+            name = str(res.get("name", ""))
+            final = target.get(name)
+            if final and final != name:
+                image_map[name] = final
+        volume_image_maps.append(image_map)
+        volume_css_list.append(volume_css)
+
+    css_resources = [r for r in resources if r["name"].lower().endswith(".css")]
+    images = [r for r in resources if not r["name"].lower().endswith(".css")]
+    return css_resources, images, doc_inline_css, volume_css_list, volume_image_maps
 
 
 def merge_books(books: list[Book], *, title: str = "") -> Book:
-    """按顺序拼合多卷为一部书：每卷开头插入“{书名} 第X卷”章节，章节序号重新编号。"""
+    """按顺序拼合多卷为一部书：每卷开头插入“{书名} 第X卷”章节，章节序号重新编号；
+    CSS/图片等静态资源按内容去重合并，正文里的插图标记随改名同步。"""
     chapters: list[Chapter] = []
     prefix = f"{title.strip()} " if title.strip() else ""
+    css_resources, images, doc_inline_css, volume_css_list, volume_image_maps = (
+        _merge_static_resources(books)
+    )
+    chapter_css: dict[str, list[str]] = {}
     for index, book in enumerate(books, start=1):
         chapters.append(Chapter(len(chapters), f"{prefix}第{index}卷", []))
+        per_volume_css = (
+            volume_css_list[index - 1] if index - 1 < len(volume_css_list) else []
+        )
+        per_volume_images = (
+            volume_image_maps[index - 1] if index - 1 < len(volume_image_maps) else {}
+        )
         for chapter in book.chapters:
+            new_sid = f"v{index}:{chapter.source_id}" if chapter.source_id else ""
+            if new_sid and per_volume_css:
+                chapter_css[new_sid] = list(per_volume_css)
+            paragraphs = (
+                [_rewrite_image_markers(p, per_volume_images) for p in chapter.paragraphs]
+                if per_volume_images
+                else list(chapter.paragraphs)
+            )
             chapters.append(
                 Chapter(
                     len(chapters),
                     chapter.title,
-                    chapter.paragraphs,
-                    chapter.source_id,
+                    paragraphs,
+                    new_sid,
                     list(chapter.styles),
                 )
             )
     titles = [b.title for b in books if b.title]
     merged = Book(title=title.strip() or "、".join(titles), chapters=chapters)
-    if books:
-        merged.metadata = dict(books[0].metadata or {})
+    metadata: dict[str, Any] = {}
+    if css_resources:
+        metadata["css_resources"] = css_resources
+    if images:
+        metadata["images"] = images
+    if doc_inline_css:
+        metadata["doc_inline_css"] = doc_inline_css
+    if chapter_css:
+        metadata["chapter_css"] = chapter_css
+    merged.metadata = metadata
     return merged
 
 

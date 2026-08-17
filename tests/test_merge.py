@@ -137,5 +137,104 @@ class MergeLogicTest(unittest.TestCase):
             export_merged([], Glossary(), AppConfig(), Path("."))
 
 
+
+class MergeStyleResourceTest(unittest.TestCase):
+    def _volume(self, title: str, css: bytes, img: bytes) -> Book:
+        return Book(
+            title=title,
+            chapters=[
+                Chapter(
+                    0,
+                    "第1章",
+                    ["正文 \u27e6img:Images/p1.png\u27e7 结尾"],
+                    source_id="chap.xhtml",
+                )
+            ],
+            metadata={
+                "css_resources": [{"name": "Styles/main.css", "content": css}],
+                "images": [{"name": "Images/p1.png", "content": img}],
+                "doc_inline_css": {"chap.xhtml": ["p { color: red; }"]},
+            },
+        )
+
+    def test_merge_books_dedupes_identical_css_and_images(self):
+        css = b".center { text-align: center; }"
+        b1 = self._volume("卷一", css, b"AAA")
+        b2 = self._volume("卷二", css, b"AAA")
+        merged = merge_books([b1, b2], title="合集")
+        self.assertEqual(len(merged.metadata["css_resources"]), 1)
+        self.assertEqual(len(merged.metadata["images"]), 1)
+        self.assertEqual(
+            merged.metadata["chapter_css"],
+            {
+                "v1:chap.xhtml": ["Styles/main.css"],
+                "v2:chap.xhtml": ["Styles/main.css"],
+            },
+        )
+        self.assertIn("v1:chap.xhtml", merged.metadata["doc_inline_css"])
+        self.assertIn("v2:chap.xhtml", merged.metadata["doc_inline_css"])
+
+    def test_merge_books_renames_conflicting_css_and_images_per_volume(self):
+        b1 = self._volume("卷一", b".center { color: red; }", b"AAA")
+        b2 = self._volume("卷二", b".center { color: blue; }", b"BBB")
+        merged = merge_books([b1, b2], title="合集")
+        css_names = [r["name"] for r in merged.metadata["css_resources"]]
+        self.assertEqual(css_names, ["Styles/main.css", "Styles/main_v2.css"])
+        self.assertEqual(
+            merged.metadata["chapter_css"],
+            {
+                "v1:chap.xhtml": ["Styles/main.css"],
+                "v2:chap.xhtml": ["Styles/main_v2.css"],
+            },
+        )
+        img_names = [r["name"] for r in merged.metadata["images"]]
+        self.assertIn("Images/p1.png", img_names)
+        self.assertIn("Images/p1_v2.png", img_names)
+        paras = [ch.paragraphs[0] for ch in merged.chapters if ch.title == "第1章"]
+        self.assertEqual(len(paras), 2)
+        self.assertIn("\u27e6img:Images/p1.png\u27e7", paras[0])
+        self.assertIn("\u27e6img:Images/p1_v2.png\u27e7", paras[1])
+
+    def test_book_from_state_restores_metadata(self):
+        import base64
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            txt = tmp / "vol1.txt"
+            txt.write_text("제1장 시작\n본문입니다.", encoding="utf-8")
+            book = load_book(txt)
+            config = AppConfig(chunk_chars=1800, max_paragraph_chars=2600)
+            chunks = build_chunks(book, config)
+            state = {
+                "source": str(txt),
+                "total_chunks": len(chunks),
+                "completed": {chunks[0].id: ["译文一", "译文二"]},
+                "failed": {},
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "metadata": {
+                    "css_resources": [
+                        {
+                            "name": "Styles/main.css",
+                            "content_b64": base64.b64encode(b".center{}").decode("ascii"),
+                        }
+                    ],
+                    "images": [
+                        {
+                            "name": "Images/p1.png",
+                            "content_b64": base64.b64encode(b"\x89PNG").decode("ascii"),
+                        }
+                    ],
+                },
+            }
+            state_path = tmp / "vol1.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            restored = book_from_state(state_path, AppConfig())
+        self.assertEqual(
+            restored.metadata["css_resources"][0]["content"], b".center{}"
+        )
+        self.assertEqual(restored.metadata["images"][0]["content"], b"\x89PNG")
+
+
 if __name__ == "__main__":
     unittest.main()

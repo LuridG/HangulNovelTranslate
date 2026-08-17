@@ -10,7 +10,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .book import Book, Chapter, ParagraphStyle, book_to_txt, export_epub, load_book
+from .book import (
+    Book,
+    Chapter,
+    ParagraphStyle,
+    book_to_txt,
+    export_epub,
+    load_book,
+    metadata_to_dict,
+    strip_inline_markers,
+)
 from .config import AppConfig
 from .glossary import Glossary
 from .llm import LLMClient
@@ -121,8 +130,9 @@ def collect_sample_text(book: Book, config: AppConfig) -> str:
     limit_chapters = min(config.extract_sample_chapters, len(book.chapters))
     for chapter in sorted(book.chapters, key=len, reverse=True)[:limit_chapters]:
         for paragraph in chapter.paragraphs:
-            sample.append(paragraph)
-            chars += len(paragraph)
+            text = strip_inline_markers(paragraph)
+            sample.append(text)
+            chars += len(text)
             if chars >= config.extract_sample_chars:
                 break
         if chars >= config.extract_sample_chars:
@@ -154,6 +164,7 @@ TRANSLATION_SYSTEM_TEMPLATE = """你是一名资深的韩语小说中文译者�
 1. 严格忠实原文，不增删情节，不改动事实。
 2. 保留原句语气、对话感、修辞和段落顺序。
 3. 以下专有名词词表是全书统一译名，必须严格遵守；如果词表与你的常识冲突，以词表为准。
+4. 原文中的行内格式标记（⟦b⟧⟦i⟧⟦u⟧⟦s:样式⟧⟦img:路径⟧⟦fn:编号⟧⟦br⟧）必须原样保留在对应译文位置，不要删除、改写或添加；标记不是正文内容。
 
 【专有名词词表】
 {glossary}
@@ -284,6 +295,7 @@ class Translator:
         state["total_chunks"] = len(chunks)
         state["chunk_chars"] = self.config.chunk_chars
         state["max_paragraph_chars"] = self.config.max_paragraph_chars
+        state["metadata"] = metadata_to_dict(book.metadata)
         self._save_state(state_path, state)
 
         pending = [c for c in chunks if c.id not in completed]

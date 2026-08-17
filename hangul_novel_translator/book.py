@@ -1,13 +1,14 @@
 # hangul_novel_translator/book.py
 from __future__ import annotations
 
+import base64
 import html
 import re
 import unicodedata
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from typing import Iterable
 
 
@@ -277,6 +278,234 @@ def _collect_css_resources(book) -> list[dict]:
     return resources
 
 
+
+_MARKER_RE = re.compile("\u27e6(/?)([a-z]+)(?::([^\u27e7]*))?\u27e7")
+_INLINE_STYLE_KEYS = ("color", "background-color", "font-style", "font-weight")
+
+
+def _inline_style_css(tag) -> str:
+    """从行内标签提取局部格式：只保留颜色/背景色/斜体/加粗等简单属性。"""
+    parts: list[str] = []
+    style = (tag.get("style") or "").strip()
+    if style:
+        for decl in style.rstrip(";").split(";"):
+            decl = decl.strip()
+            if not decl:
+                continue
+            key, _, value = decl.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            if key in _INLINE_STYLE_KEYS and value:
+                parts.append(f"{key}:{value}")
+    if tag.name == "font":
+        color = (tag.get("color") or "").strip()
+        if color and not any(p.startswith("color:") for p in parts):
+            parts.append(f"color:{color}")
+        face = (tag.get("face") or "").strip()
+        if face and not any(p.startswith("font-family:") for p in parts):
+            parts.append(f"font-family:{face}")
+    return ";".join(parts)
+
+
+def _resolve_href(base_href: str, src: str) -> str:
+    """以章节文件为基准，把 img src 解析为 epub 包内路径。"""
+    try:
+        joined = urljoin(base_href, src)
+        return unquote(urlparse(joined).path).lstrip("/")
+    except Exception:
+        return src
+
+
+def _collect_image_items(book) -> dict[str, bytes]:
+    from ebooklib import ITEM_IMAGE
+
+    items: dict[str, bytes] = {}
+    for item in book.get_items():
+        if item.get_type() == ITEM_IMAGE:
+            items[str(item.get_name())] = bytes(item.get_content())
+    return items
+
+
+def _register_image(resolved: str, image_items: dict[str, bytes], images_out: dict) -> str:
+    """把插图登记进 metadata["images"]，返回包内路径；找不到原图时仅保留标记。"""
+    content = image_items.get(resolved)
+    if content is None:
+        for name, data in image_items.items():
+            if _href_basename(name) == _href_basename(resolved):
+                content = data
+                resolved = name
+                break
+    if content is None:
+        return resolved
+    added = images_out["added"]
+    if resolved not in added:
+        added.add(resolved)
+        images_out["list"].append({"name": resolved, "content": content})
+    return resolved
+
+
+def _inline_markup_children(node, image_items: dict, base_href: str, images_out: dict) -> str:
+    parts: list[str] = []
+    for child in node.children:
+        parts.append(_inline_markup(child, image_items, base_href, images_out))
+    return "".join(parts)
+
+
+def _inline_markup(node, image_items: dict, base_href: str, images_out: dict) -> str:
+    """递归提取行内内容，把局部格式编码为 ⟦b⟧/⟦i⟧/⟦u⟧/⟦s:样式⟧、插图 ⟦img:路径⟧、
+    脚注引用 ⟦fn:锚点⟧、换行 ⟦br⟧ 等标记，译文回传时再还原为 HTML。"""
+    if isinstance(node, str) or getattr(node, "name", None) is None:
+        return str(node)
+    name = node.name.lower()
+    if name in ("script", "style", "noscript"):
+        return ""
+    if name == "img":
+        src = (node.get("src") or "").strip()
+        if not src or src.lower().startswith("data:"):
+            return ""
+        resolved = _resolve_href(base_href, src)
+        return f"\u27e6img:{_register_image(resolved, image_items, images_out)}\u27e7"
+    if name == "br":
+        return "\u27e6br\u27e7"
+    if name == "a":
+        href = node.get("href") or ""
+        if href.startswith("#") and len(href) > 1:
+            return f"\u27e6fn:{href[1:]}\u27e7"
+        return _inline_markup_children(node, image_items, base_href, images_out)
+    if name in ("b", "strong"):
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        return f"\u27e6b\u27e7{inner}\u27e6/b\u27e7" if inner else ""
+    if name in ("i", "em"):
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        return f"\u27e6i\u27e7{inner}\u27e6/i\u27e7" if inner else ""
+    if name == "u":
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        return f"\u27e6u\u27e7{inner}\u27e6/u\u27e7" if inner else ""
+    if name in ("span", "font"):
+        css = _inline_style_css(node)
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        if not inner:
+            return ""
+        return f"\u27e6s:{css}\u27e7{inner}\u27e6/s\u27e7" if css else inner
+    return _inline_markup_children(node, image_items, base_href, images_out)
+
+
+def _block_text_markers(block, image_items: dict, base_href: str, images_out: dict) -> str:
+    raw = _inline_markup(block, image_items, base_href, images_out)
+    return _strip_invisible_chars(re.sub(r"\s+", " ", raw)).strip()
+
+
+def _open_marker_tag(name: str, value: str) -> str:
+    if name == "b":
+        return "<b>"
+    if name == "i":
+        return "<i>"
+    if name == "u":
+        return "<u>"
+    if name == "s":
+        style_attr = f' style="{html.escape(value, quote=True)}"' if value else ""
+        return f"<span{style_attr}>"
+    return ""
+
+
+def _close_marker_tag(name: str) -> str:
+    if name in ("b", "i", "u"):
+        return f"</{name}>"
+    if name == "s":
+        return "</span>"
+    return ""
+
+
+def _inline_markers_to_html(text: str) -> str:
+    """把 ⟦格式⟧ 标记还原为行内 HTML；自动丢弃孤立闭合、自动闭合未闭合的配对标记。"""
+    escaped = html.escape(text, quote=False)
+    parts: list[str] = []
+    stack: list[tuple[str, str]] = []
+    pos = 0
+    for m in _MARKER_RE.finditer(escaped):
+        parts.append(escaped[pos:m.start()])
+        pos = m.end()
+        closing = m.group(1) == "/"
+        name = m.group(2)
+        value = m.group(3) or ""
+        if name == "img":
+            parts.append(f'<img src="{html.escape(value, quote=True)}" alt="插图"/>')
+        elif name == "br":
+            parts.append("<br/>")
+        elif name == "fn":
+            parts.append(f'<a href="#{html.escape(value, quote=True)}"><sup>注</sup></a>')
+        elif closing:
+            if stack and stack[-1][0] == name:
+                stack.pop()
+                parts.append(_close_marker_tag(name))
+        elif name in ("b", "i", "u", "s"):
+            stack.append((name, value))
+            parts.append(_open_marker_tag(name, value))
+        # 其余未知标记：忽略
+    parts.append(escaped[pos:])
+    for name, value in reversed(stack):
+        parts.append(_close_marker_tag(name))
+    return "".join(parts)
+
+
+def strip_inline_markers(text: str, *, image_placeholder: str = "【插图】") -> str:
+    """去掉行内格式标记，用于 TXT 输出与词表采样。"""
+    def _repl(match) -> str:
+        return image_placeholder if match.group(2) == "img" else ""
+
+    return _MARKER_RE.sub(_repl, text)
+
+
+def metadata_to_dict(metadata: dict) -> dict:
+    """把 Book.metadata 序列化为可写入 JSON 的 dict（CSS/图片等二进制资源转 base64）。"""
+    result: dict = {}
+    for key in ("css_resources", "images"):
+        resources = metadata.get(key)
+        if not resources:
+            continue
+        serialized: list[dict] = []
+        for res in resources:
+            content = res.get("content", b"")
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            serialized.append(
+                {
+                    "name": str(res.get("name", "")),
+                    "content_b64": base64.b64encode(bytes(content)).decode("ascii"),
+                }
+            )
+        result[key] = serialized
+    inline = metadata.get("doc_inline_css")
+    if inline:
+        result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
+    return result
+
+
+def metadata_from_dict(data: dict | None) -> dict:
+    """metadata_to_dict 的逆操作。"""
+    data = data or {}
+    result: dict = {}
+    for key in ("css_resources", "images"):
+        resources = data.get(key)
+        if not resources:
+            continue
+        result[key] = []
+        for res in resources:
+            encoded = res.get("content_b64") or res.get("content")
+            if isinstance(encoded, str):
+                try:
+                    content = base64.b64decode(encoded)
+                except Exception:
+                    content = encoded.encode("utf-8")
+            else:
+                content = bytes(encoded or b"")
+            result[key].append({"name": str(res.get("name", "")), "content": content})
+    inline = data.get("doc_inline_css")
+    if inline:
+        result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
+    return result
+
+
 def parse_epub(path: Path) -> Book:
     try:
         from bs4 import BeautifulSoup
@@ -307,6 +536,9 @@ def parse_epub(path: Path) -> Book:
 
     doc_inline_css: dict[str, list[str]] = {}
     css_resources = _collect_css_resources(book)
+    image_items = _collect_image_items(book)
+    metadata_images: list[dict] = []
+    images_out: dict = {"added": set(), "list": metadata_images}
 
     for index, idref in enumerate(spine_ids):
         item_id = idref[0] if isinstance(idref, (tuple, list)) else idref
@@ -337,7 +569,7 @@ def parse_epub(path: Path) -> Book:
         styles: list[ParagraphStyle | None] = []
         seen: set[str] = set()
         for block in blocks:
-            text = _strip_invisible_chars(block.get_text(" ", strip=True))
+            text = _block_text_markers(block, image_items, item.get_name(), images_out)
             if not text or text in seen:
                 continue
             seen.add(text)
@@ -364,6 +596,8 @@ def parse_epub(path: Path) -> Book:
         result.metadata["doc_inline_css"] = doc_inline_css
     if css_resources:
         result.metadata["css_resources"] = css_resources
+    if metadata_images:
+        result.metadata["images"] = metadata_images
     return result
 
 
@@ -387,7 +621,7 @@ def book_to_txt(book: Book, path: Path, encoding: str = "utf-8") -> None:
         lines.append(chapter.title)
         lines.append("")
         for para in chapter.paragraphs:
-            lines.append(para)
+            lines.append(strip_inline_markers(para))
             lines.append("")
         lines.append("")
     path.write_text("\n".join(lines), encoding=encoding)
@@ -423,12 +657,15 @@ def _style_attrs(style: BlockStyle) -> str:
 
 
 def _block_to_html(style: ParagraphStyle | None, text: str) -> str:
-    """按段落样式还原 HTML：无样式输出普通 <p>，有样式则还原标签/class/内联 style。"""
+    """按段落样式还原 HTML：无样式输出普通 <p>，有样式则还原标签/class/内联 style；
+    段落内的 ⟦格式⟧ 标记一并还原为行内 HTML。"""
+    body = _inline_markers_to_html(text)
     if style is None or style.block is None:
-        return f"<p>{html.escape(text)}</p>"
+        return f"<p>{body}</p>"
     attrs = _style_attrs(style.block)
     opening = f"<{style.block.tag} {attrs}>" if attrs else f"<{style.block.tag}>"
-    return f"{opening}{html.escape(text)}</{style.block.tag}>"
+    return f"{opening}{body}</{style.block.tag}>"
+
 
 
 def _ancestors_key(style: ParagraphStyle | None):
@@ -477,13 +714,19 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
         for res in css_resources
         if str(res["name"]).lower().endswith(".css")
     }
+    chapter_css_map = metadata.get("chapter_css") or {}
 
     chapter_items: list = []
     for i, chapter in enumerate(book.chapters, start=1):
         file_name = f"chap_{i:04d}.xhtml"
         item = epub.EpubHtml(title=chapter.title, file_name=file_name, lang="zh")
-        for name in sorted(css_names):
-            item.add_link(href=name, rel="stylesheet", type="text/css")
+        chapter_css = chapter_css_map.get(chapter.source_id)
+        if chapter_css:
+            for name in chapter_css:
+                item.add_link(href=name, rel="stylesheet", type="text/css")
+        else:
+            for name in sorted(css_names):
+                item.add_link(href=name, rel="stylesheet", type="text/css")
         inline_styles = doc_inline_css.get(chapter.source_id) or []
         if inline_styles:
             # 原文档的内联 <style> 转成独立 CSS 项，只挂到对应章节。
@@ -527,6 +770,17 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
                     file_name=name,
                     media_type=_mime_for_name(name),
                     content=res["content"],
+                )
+            )
+    for img in metadata.get("images") or []:
+        name = str(img.get("name", ""))
+        if name and not any(it.file_name == name for it in out.items):
+            out.add_item(
+                epub.EpubItem(
+                    uid=f"img-{len(out.items)}",
+                    file_name=name,
+                    media_type=_mime_for_name(name),
+                    content=img.get("content", b""),
                 )
             )
 
