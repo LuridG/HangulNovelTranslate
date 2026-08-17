@@ -278,6 +278,46 @@ class EpubInlineFormatTest(unittest.TestCase):
         )
 
 
+
+@unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
+class ChapterTitleTest(unittest.TestCase):
+    def _make_two_page_book(self, tmp: Path, page2_body: str) -> Path:
+        src = epub_lib.EpubBook()
+        src.set_identifier("title-test")
+        src.set_title("타이틀")
+        src.set_language("ko")
+        page1 = epub_lib.EpubHtml(uid="p1", title="", file_name="Text/p1.xhtml", lang="ko")
+        page1.content = "<html><body><h1>제1장 시작</h1><p>첫 문단.</p></body></html>"
+        page2 = epub_lib.EpubHtml(uid="p2", title="", file_name="Text/p2.xhtml", lang="ko")
+        page2.content = f"<html><body>{page2_body}</body></html>"
+        src.add_item(page1)
+        src.add_item(page2)
+        src.toc = (epub_lib.Link("Text/p1.xhtml", "제1장 시작", "p1"),)
+        src.add_item(epub_lib.EpubNcx())
+        src.add_item(epub_lib.EpubNav())
+        src.spine = ["nav", page1, page2]
+        path = tmp / "titles.epub"
+        epub_lib.write_epub(str(path), src)
+        return path
+
+    def test_heading_not_duplicated_and_untitled_merges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book = parse_epub(self._make_two_page_book(Path(tmp), "<p>둘째 문단.</p>"))
+        # nav 页被跳过；p1 标题不进正文；p2 无标题并入 p1，不再产生“第 X 节”
+        self.assertEqual(len(book.chapters), 1)
+        ch = book.chapters[0]
+        self.assertEqual(ch.title, "제1장 시작")
+        self.assertEqual(ch.paragraphs, ["첫 문단.", "둘째 문단."])
+        self.assertNotIn("第", ch.title)
+
+    def test_normalize_title_strips_zalgo(self):
+        from hangul_novel_translator.book import _normalize_title
+
+        zalgo = "S\u0337\u0308\u0311tr\u0301\u0337ange dream"
+        self.assertEqual(_normalize_title(zalgo), "Strange dream")
+        self.assertEqual(_normalize_title("  후기  "), "후기")
+
+
 class UtilsTest(unittest.TestCase):
     def test_extract_json_code_block(self):
         self.assertEqual(extract_json('```json\n{"a": 1}\n```'), {"a": 1})

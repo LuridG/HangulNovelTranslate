@@ -213,5 +213,61 @@ class TranslatorRetryTest(unittest.TestCase):
             self.assertTrue(expected.exists(), [p.name for p in tmp.iterdir()])
 
 
+
+class TitleFakeLLM:
+    """替身：返回章节名翻译 JSON。"""
+
+    def __init__(self, config):
+        self.config = config
+        self.messages = None
+
+    def chat(self, messages, *, temperature=None, json_mode=False):
+        self.messages = messages
+        return '{"titles": {"0": "第一章译", "1": "第二章译"}}'
+
+
+class ChapterTitleTranslateTest(unittest.TestCase):
+    def test_translate_chapter_titles(self):
+        from hangul_novel_translator.translator import Translator
+
+        book = Book(
+            title="测试",
+            chapters=[Chapter(0, "제1장", ["가"]), Chapter(1, "제2장", ["나"])],
+        )
+        fake = TitleFakeLLM(AppConfig())
+        old = translator_module.LLMClient
+        translator_module.LLMClient = lambda cfg: fake
+        try:
+            translator = Translator(AppConfig())
+            translator._translate_chapter_titles(book, Glossary())
+        finally:
+            translator_module.LLMClient = old
+        self.assertEqual(book.chapters[0].title_zh, "第一章译")
+        self.assertEqual(book.chapters[1].title_zh, "第二章译")
+        self.assertIn("제1장", fake.messages[1]["content"])
+
+    def test_translate_chapter_titles_keeps_original_on_failure(self):
+        from hangul_novel_translator.translator import Translator
+
+        book = Book(title="测试", chapters=[Chapter(0, "제1장", ["가"])])
+
+        class BoomLLM:
+            def __init__(self, config):
+                self.config = config
+
+            def chat(self, messages, *, temperature=None, json_mode=False):
+                raise RuntimeError("boom")
+
+        old = translator_module.LLMClient
+        translator_module.LLMClient = lambda cfg: BoomLLM(cfg)
+        try:
+            translator = Translator(AppConfig())
+            translator._translate_chapter_titles(book, Glossary())
+        finally:
+            translator_module.LLMClient = old
+        self.assertEqual(book.chapters[0].title_zh, "")
+        self.assertEqual(book.chapters[0].display_title, "제1장")
+
+
 if __name__ == "__main__":
     unittest.main()

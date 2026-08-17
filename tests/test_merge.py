@@ -236,5 +236,60 @@ class MergeStyleResourceTest(unittest.TestCase):
         self.assertEqual(restored.metadata["images"][0]["content"], b"\x89PNG")
 
 
+
+class ChapterTitleMergeTest(unittest.TestCase):
+    def test_merge_books_heading_levels(self):
+        b1 = Book(title="卷一", chapters=[Chapter(0, "제1장", ["a"])])
+        b2 = Book(title="卷二", chapters=[Chapter(0, "제2장", ["b"])])
+        merged = merge_books([b1, b2], title="合集")
+        self.assertEqual([ch.title for ch in merged.chapters], ["合集 第1卷", "제1장", "合集 第2卷", "제2장"])
+        self.assertEqual([ch.heading_level for ch in merged.chapters], [1, 2, 1, 2])
+
+    def test_merge_books_carries_title_zh(self):
+        ch = Chapter(0, "제1장", ["a"], title_zh="第一章")
+        merged = merge_books([Book(title="卷一", chapters=[ch])], title="合集")
+        self.assertEqual(merged.chapters[1].title_zh, "第一章")
+        self.assertEqual(merged.chapters[1].display_title, "第一章")
+
+    def test_book_from_state_restores_title_zh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            txt = tmp / "vol1.txt"
+            txt.write_text("제1장 시작\n본문입니다.", encoding="utf-8")
+            book = load_book(txt)
+            config = AppConfig(chunk_chars=1800, max_paragraph_chars=2600)
+            chunks = build_chunks(book, config)
+            state = {
+                "source": str(txt),
+                "total_chunks": len(chunks),
+                "completed": {chunks[0].id: ["译文一", "译文二"]},
+                "failed": {},
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "chapter_titles": {"0": {"ko": "제1장 시작", "zh": "第一章 开始"}},
+            }
+            state_path = tmp / "vol1.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            restored = book_from_state(state_path, AppConfig())
+        self.assertEqual(restored.chapters[0].title_zh, "第一章 开始")
+        self.assertEqual(restored.chapters[0].display_title, "第一章 开始")
+
+    def test_book_from_state_raises_on_structure_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            txt = tmp / "vol1.txt"
+            txt.write_text("본문입니다.", encoding="utf-8")
+            state = {
+                "source": str(txt),
+                "total_chunks": 5,
+                "completed": {"ch-00000-00000": ["旧译文"]},
+                "failed": {},
+            }
+            state_path = tmp / "vol1.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                book_from_state(state_path, AppConfig())
+
+
 if __name__ == "__main__":
     unittest.main()

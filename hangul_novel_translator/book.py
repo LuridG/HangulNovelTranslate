@@ -35,6 +35,13 @@ class Chapter:
     paragraphs: list[str] = field(default_factory=list)
     source_id: str = ""
     styles: list[ParagraphStyle | None] = field(default_factory=list)
+    title_zh: str = ""
+    heading_level: int = 1
+
+    @property
+    def display_title(self) -> str:
+        """输出用章节名：优先已翻译的译文标题，否则用原文章节名。"""
+        return self.title_zh or self.title
 
     @property
     def text(self) -> str:
@@ -174,6 +181,18 @@ _SKIP_PAGE_MARKERS = ("목차", "판권", "copyright")
 def _strip_invisible_chars(text: str) -> str:
     """去掉零宽/不可见格式字符（U+200B~U+200F、U+2060~U+2064、U+FEFF 等 Cf 类字符）。"""
     return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+
+def _normalize_title(text: str) -> str:
+    """清理章节名：去掉不可见字符与组合装饰符（zalgo 乱码），折叠空白。"""
+    text = _strip_invisible_chars(text)
+    cleaned = "".join(ch for ch in text if unicodedata.category(ch) not in ("Mn", "Me"))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_weak_title(title: str) -> bool:
+    """目录里的占位标题（如单字母 A/B、空标题）视为弱标题，优先用正文标题。"""
+    return len(title) <= 2
 
 
 def _is_skip_marker_line(line: str) -> bool:
@@ -532,7 +551,7 @@ def parse_epub(path: Path) -> Book:
     if not spine_ids:
         spine_ids = list(items.keys())
 
-    skip_filename_markers = ("cover", "copyright", "toc", "titlepage", "colophon", "frontmatter", "backmatter")
+    skip_filename_markers = ("cover", "copyright", "toc", "titlepage", "colophon", "frontmatter", "backmatter", "nav")
 
     doc_inline_css: dict[str, list[str]] = {}
     css_resources = _collect_css_resources(book)
@@ -554,21 +573,25 @@ def parse_epub(path: Path) -> Book:
             tag.decompose()
 
         basename = _href_basename(item.get_name())
-        chapter_title = toc_titles.get(basename) or ""
-        if not chapter_title:
-            heading = soup.find(["h1", "h2", "h3"])
-            chapter_title = (
-                _strip_invisible_chars(heading.get_text(" ", strip=True)) if heading else ""
-            )
-
-        if not chapter_title:
-            chapter_title = f"第 {index + 1} 节"
+        heading = soup.find(["h1", "h2", "h3"])
+        heading_title = _normalize_title(heading.get_text(" ", strip=True)) if heading else ""
+        toc_title = toc_titles.get(basename) or ""
+        if toc_title and not _is_weak_title(toc_title):
+            chapter_title = toc_title
+        elif heading_title:
+            chapter_title = heading_title
+        else:
+            chapter_title = toc_title  # 弱目录标题或空标题
+        chapter_title = _normalize_title(chapter_title)  # 目录标题同样做 zalgo/空白清理
 
         blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"])
         paragraphs: list[str] = []
         styles: list[ParagraphStyle | None] = []
         seen: set[str] = set()
         for block in blocks:
+            if block is heading:
+                # 章节标题元素不进正文，避免标题被当正文翻译并重复输出。
+                continue
             text = _block_text_markers(block, image_items, item.get_name(), images_out)
             if not text or text in seen:
                 continue
@@ -578,6 +601,8 @@ def parse_epub(path: Path) -> Book:
 
         if not paragraphs:
             body = soup.body or soup
+            if heading is not None:
+                heading.decompose()
             text = _strip_invisible_chars(body.get_text("\n", strip=True))
             paragraphs = [x.strip() for x in text.split("\n") if x.strip()]
 
@@ -585,11 +610,22 @@ def parse_epub(path: Path) -> Book:
             continue
         if _has_skip_text_marker(paragraphs):
             continue
+        if not paragraphs and not chapter_title:
+            continue  # 无标题也无正文的空白/装饰页
 
-        if paragraphs:
-            chapters.append(
-                Chapter(index, chapter_title, paragraphs, source_id=item_id, styles=styles)
-            )
+        if not chapter_title and chapters:
+            # 无标题页面视为上一章的续篇正文页，并入上一章，不产生“第 X 节”式假章节名。
+            chapters[-1].paragraphs.extend(paragraphs)
+            chapters[-1].styles.extend(styles)
+            if inline_css:
+                doc_inline_css.setdefault(chapters[-1].source_id, []).extend(inline_css)
+            continue
+        if not chapter_title:
+            chapter_title = Path(item.get_name()).stem.replace("_", " ").strip() or "未命名"
+
+        chapters.append(
+            Chapter(index, chapter_title, paragraphs, source_id=item_id, styles=styles)
+        )
 
     result = Book(title=title, chapters=chapters, source_path=path)
     if doc_inline_css:
@@ -618,7 +654,7 @@ def book_to_txt(book: Book, path: Path, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = [book.title, ""]
     for chapter in book.chapters:
-        lines.append(chapter.title)
+        lines.append(chapter.display_title)
         lines.append("")
         for para in chapter.paragraphs:
             lines.append(strip_inline_markers(para))
@@ -719,7 +755,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
     chapter_items: list = []
     for i, chapter in enumerate(book.chapters, start=1):
         file_name = f"chap_{i:04d}.xhtml"
-        item = epub.EpubHtml(title=chapter.title, file_name=file_name, lang="zh")
+        item = epub.EpubHtml(title=chapter.display_title, file_name=file_name, lang="zh")
         chapter_css = chapter_css_map.get(chapter.source_id)
         if chapter_css:
             for name in chapter_css:
@@ -738,7 +774,9 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
                     "content": ("\n".join(inline_styles)).encode("utf-8"),
                 }
             )
-        body = [f"<h1>{html.escape(chapter.title)}</h1>"]
+        body = [
+            f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
+        ]
         prev_key = None
         prev_style: ParagraphStyle | None = None
         first = True

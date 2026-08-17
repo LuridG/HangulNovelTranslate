@@ -354,6 +354,20 @@ class Translator:
         else:
             self.progress_callback("组合书籍", total, total, "正在组装译文…")
 
+        # 章节名：统一批量翻译并落盘（续传/多卷合并直接使用已保存结果，不再随正文翻译）。
+        if not state.get("chapter_titles"):
+            self._translate_chapter_titles(book, glossary)
+            state["chapter_titles"] = {
+                str(ch.index): {"ko": ch.title, "zh": ch.title_zh} for ch in book.chapters
+            }
+            self._save_state(state_path, state)
+        else:
+            saved_titles = state["chapter_titles"]
+            for ch in book.chapters:
+                saved = saved_titles.get(str(ch.index)) or {}
+                if saved.get("zh") and saved.get("ko") == ch.title:
+                    ch.title_zh = saved["zh"]
+
         translated_book = self._assemble(book, chunks, completed, failed, glossary)
         output_paths: list[Path] = []
         base_stem = f"{output_stem or book.title}.zh"
@@ -469,6 +483,34 @@ class Translator:
         )
         return glossary
 
+    def _translate_chapter_titles(self, book: Book, glossary: Glossary) -> None:
+        """批量翻译章节名：标记好的章节名不随正文翻译，单独成批交给 LLM；失败保留原标题。"""
+        entries = [(i, ch) for i, ch in enumerate(book.chapters) if ch.title]
+        if not entries:
+            return
+        numbered = "\n".join(f"[{i}] {ch.title}" for i, ch in entries)
+        system = (
+            "你是一名资深韩语小说译者。下面是小说里的一组韩语章节名，请翻译成简体中文。\n"
+            "要求：保持编号与符号（如 IF…? 1、第3话）和原有风格；人名/专有名词参考词表；"
+            '只输出 JSON 对象 {"titles": {"0": "翻译1", "1": "翻译2", ...}}，键与编号一一对应。'
+        )
+        glossary_text = glossary.prompt_text()
+        user = f"【专有名词词表】\n{glossary_text}\n\n【章节名列表】\n{numbered}"
+        mapping: dict = {}
+        try:
+            raw = self.llm.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                json_mode=True,
+            )
+            payload = extract_json(raw)
+            mapping = payload.get("titles") or {}
+        except Exception:
+            mapping = {}
+        for i, ch in entries:
+            zh = mapping.get(str(i))
+            if zh:
+                ch.title_zh = str(zh).strip()
+
     def _assemble(
         self,
         book: Book,
@@ -498,7 +540,15 @@ class Translator:
                 paragraphs = chapter.paragraphs
                 styles = list(chapter.styles)
             translated_chapters.append(
-                Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id, styles)
+                Chapter(
+                    chapter.index,
+                    chapter.title,
+                    paragraphs,
+                    chapter.source_id,
+                    styles,
+                    title_zh=chapter.title_zh,
+                    heading_level=chapter.heading_level,
+                )
             )
 
         return Book(

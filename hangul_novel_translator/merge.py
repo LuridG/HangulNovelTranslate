@@ -68,6 +68,16 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
     if not isinstance(completed, dict):
         completed = {}
     chunks = build_chunks(book, cfg)
+    completed_ids = {str(k) for k in (completed or {}).keys()}
+    saved_total = data.get("total_chunks")
+    structure_changed = (
+        (isinstance(saved_total, int) and saved_total > 0 and saved_total != len(chunks))
+        or (completed_ids and not (completed_ids & {c.id for c in chunks}))
+    )
+    if completed_ids and structure_changed:
+        raise ValueError(
+            "存档的章节结构与当前解析不一致（章节解析规则已更新），请重新翻译后再合并输出。"
+        )
     by_chapter: dict[int, list[Any]] = {}
     for chunk in chunks:
         by_chapter.setdefault(chunk.chapter_index, []).append(chunk)
@@ -87,7 +97,22 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
         if not paragraphs:
             paragraphs = chapter.paragraphs
             styles = list(chapter.styles)
-        chapters.append(Chapter(chapter.index, chapter.title, paragraphs, chapter.source_id, styles))
+        chapters.append(
+            Chapter(
+                chapter.index,
+                chapter.title,
+                paragraphs,
+                chapter.source_id,
+                styles,
+                title_zh=chapter.title_zh,
+                heading_level=chapter.heading_level,
+            )
+        )
+    saved_titles = data.get("chapter_titles") or {}
+    for chapter in chapters:
+        saved = saved_titles.get(str(chapter.index)) or {}
+        if saved.get("zh") and saved.get("ko") == chapter.title:
+            chapter.title_zh = saved["zh"]
     return Book(
             title=book.title,
             chapters=chapters,
@@ -246,6 +271,8 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
                     paragraphs,
                     new_sid,
                     list(chapter.styles),
+                    title_zh=chapter.title_zh,
+                    heading_level=2,
                 )
             )
     titles = [b.title for b in books if b.title]
