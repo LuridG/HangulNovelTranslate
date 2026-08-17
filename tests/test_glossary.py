@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hangul_novel_translator.glossary import (
+    EXTRACTION_MORE_SYSTEM,
+    EXTRACTION_SYSTEM,
     Glossary,
     GlossaryEntry,
     extract_more_glossary,
@@ -131,6 +133,22 @@ class GlossaryReplacementTest(unittest.TestCase):
         )
         # 单字变体不参与替换；韩文原词仍正常替换。
         self.assertEqual(glossary.apply_replacements("熙来了。준희가 왔다."), "熙来了。俊熙가 왔다.")
+
+
+class PromptSpecTest(unittest.TestCase):
+    def test_extraction_system_specs(self):
+        self.assertIn("原形", EXTRACTION_SYSTEM)
+        self.assertIn("助词", EXTRACTION_SYSTEM)
+        self.assertIn("준희가", EXTRACTION_SYSTEM)
+        self.assertIn("待确认", EXTRACTION_SYSTEM)
+        self.assertIn("person|place|org|term|title", EXTRACTION_SYSTEM)
+        self.assertIn("JSON", EXTRACTION_SYSTEM)
+
+    def test_extraction_more_system_specs(self):
+        self.assertIn("还没有", EXTRACTION_MORE_SYSTEM)
+        self.assertIn("原形", EXTRACTION_MORE_SYSTEM)
+        self.assertIn("同一实体", EXTRACTION_MORE_SYSTEM)
+        self.assertIn("待确认", EXTRACTION_MORE_SYSTEM)
 
 
 if __name__ == "__main__":
