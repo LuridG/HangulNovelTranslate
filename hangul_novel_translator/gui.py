@@ -322,8 +322,9 @@ class App(ctk.CTk):
         ctk.CTkButton(actions, text="确认选中", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
         ctk.CTkButton(actions, text="全部确认", width=90, command=self._confirm_all).grid(row=0, column=4, padx=4)
         ctk.CTkButton(actions, text="清理重复", width=90, command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
+        ctk.CTkButton(actions, text="清空词表", width=90, command=self._clear_glossary).grid(row=0, column=6, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
-        self.count_label.grid(row=0, column=6, padx=12, sticky="e")
+        self.count_label.grid(row=0, column=7, padx=12, sticky="e")
 
     def _build_merge_tab(self, parent):
         parent.grid_columnconfigure(0, weight=1)
@@ -634,6 +635,21 @@ class App(ctk.CTk):
             self._refresh_tree()
             detail = f"，清理重复 {removed} 条" if removed else ""
             self.log(f"词表已加载：{path}，共 {len(self.glossary.entries)} 条{detail}")
+
+    def _clear_glossary(self):
+        """清空当前词表，便于换一本新书重新提取。"""
+        if not self.glossary.entries:
+            messagebox.showinfo("提示", "当前词表已是空的", parent=self)
+            return
+        if not messagebox.askyesno(
+            "确认清空",
+            "确定要清空当前词表吗？\n已确认的词条也会一并移除，此操作不可撤销。",
+            parent=self,
+        ):
+            return
+        self.glossary = Glossary()
+        self._refresh_tree()
+        self.log("词表已清空")
 
     def _extract_glossary_async(self):
         files = list(self.input_files)

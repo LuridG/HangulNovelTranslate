@@ -16,6 +16,7 @@ from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary
 from hangul_novel_translator.translator import (
     Translator,
+    _chunk_signature,
     _sanitize_state_name,
     build_chunks,
     collect_sample_text,
@@ -196,7 +197,83 @@ class TranslatorRetryTest(unittest.TestCase):
             _sanitize_state_name("코즈믹 호러는 어떠세요_ (특별 외전)"),
         )
 
+    def test_translate_file_refuses_stale_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            state_path = tmp / ".某某.translation_state.json"
+            state = {
+                "source": str(src),
+                "completed": {"ch-00000-00000": ["旧译文"]},
+                "failed": {},
+                "total_chunks": 5,  # 与实际解析（1 块）不一致
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            config = AppConfig(resume=True, extract_glossary=False, output_txt=False, output_epub=False)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: FakeLLM(cfg)
+            try:
+                translator = Translator(config)
+                with self.assertRaises(ValueError) as ctx:
+                    translator.translate_file(src, tmp, Glossary(), output_stem="某某")
+            finally:
+                translator_module.LLMClient = old
+            self.assertIn("章节结构", str(ctx.exception))
+            self.assertIn("请删除存档", str(ctx.exception))
+
+    def test_translate_file_resumes_matching_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            config = AppConfig(resume=True, extract_glossary=False, output_txt=False, output_epub=False)
+            chunks = build_chunks(load_book(src), config)
+            state_path = tmp / ".某某.translation_state.json"
+            state = {
+                "source": str(src),
+                "completed": {chunks[0].id: ["译文"]},
+                "failed": {},
+                "total_chunks": len(chunks),
+                "chunk_signature": _chunk_signature(chunks),
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            fake = FakeLLM(config)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: fake
+            try:
+                translator = Translator(config)
+                result = translator.translate_file(src, tmp, Glossary(), output_stem="某某")
+            finally:
+                translator_module.LLMClient = old
+            self.assertEqual(result.completed_chunks, 1)
+            self.assertEqual(fake.calls, 1)  # 正文复用存档，仅章节名批量翻译调用 1 次 LLM
+
+    def test_translate_file_refuses_signature_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            config = AppConfig(resume=True, extract_glossary=False, output_txt=False, output_epub=False)
+            chunks = build_chunks(load_book(src), config)
+            state_path = tmp / ".某某.translation_state.json"
+            state = {
+                "source": str(src),
+                "completed": {chunks[0].id: ["旧译文"]},
+                "failed": {},
+                "total_chunks": len(chunks),
+                "chunk_signature": "deadbeef" * 8,  # 与实际签名不一致
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: FakeLLM(cfg)
+            try:
+                translator = Translator(config)
+                with self.assertRaises(ValueError) as ctx:
+                    translator.translate_file(src, tmp, Glossary(), output_stem="某某")
+            finally:
+                translator_module.LLMClient = old
+            self.assertIn("请删除存档", str(ctx.exception))
+
     def test_translate_file_state_named_by_output_stem(self):
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             src = self._make_source(tmp)

@@ -1,6 +1,7 @@
 # hangul_novel_translator/translator.py
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -66,6 +67,12 @@ def _retry_chunk_config(state: dict, config: AppConfig) -> AppConfig:
     if isinstance(state.get("max_paragraph_chars"), int) and state["max_paragraph_chars"] > 0:
         kwargs["max_paragraph_chars"] = state["max_paragraph_chars"]
     return replace(config, **kwargs) if kwargs else config
+
+
+def _chunk_signature(chunks: list[Chunk]) -> str:
+    """章节/分块结构签名：任一分块 id 变化（解析规则、分块参数、章节边界）都会改变签名，
+    用于续传前检测旧完成块是否仍能按 id 安全复用。"""
+    return hashlib.sha256("\n".join(c.id for c in chunks).encode("utf-8")).hexdigest()
 
 
 def _sanitize_state_name(stem: str, *, legacy: bool = False) -> str:
@@ -292,8 +299,47 @@ class Translator:
         state = self._load_state(state_path, input_path)
         completed: dict[str, list[str]] = state.setdefault("completed", {})
         failed: dict[str, str] = state.setdefault("failed", {})
+        # 结构防护：章节解析规则或分块参数变化会导致旧完成块按 id 错位，
+        # 直接拒绝续传，避免把旧译文静默套到不同内容上。
+        signature = _chunk_signature(chunks)
+        saved_signature = state.get("chunk_signature")
+        saved_total = state.get("total_chunks")
+        saved_completed = state.get("completed") or {}
+        saved_failed = state.get("failed") or {}
+        if saved_total or saved_completed or saved_failed:
+            structure_changed = False
+            reason = ""
+            if isinstance(saved_signature, str) and saved_signature:
+                structure_changed = saved_signature != signature
+                reason = "章节结构或分块参数已变化（解析规则更新或分块设置调整）"
+            else:
+                saved_chunk_chars = state.get("chunk_chars")
+                saved_max_paragraph_chars = state.get("max_paragraph_chars")
+                params_changed = (
+                    isinstance(saved_chunk_chars, int)
+                    and saved_chunk_chars != self.config.chunk_chars
+                ) or (
+                    isinstance(saved_max_paragraph_chars, int)
+                    and saved_max_paragraph_chars != self.config.max_paragraph_chars
+                )
+                if params_changed:
+                    structure_changed = True
+                    reason = "翻译分块参数已变化（单块字数/段落上限）"
+                elif (
+                    isinstance(saved_total, int)
+                    and saved_total > 0
+                    and saved_total != len(chunks)
+                ) or (
+                    saved_completed
+                    and not ({str(k) for k in saved_completed.keys()} & {c.id for c in chunks})
+                ):
+                    structure_changed = True
+                    reason = "存档的章节结构与当前解析不一致（章节解析规则已更新）"
+            if structure_changed:
+                raise ValueError(f"{reason}，请删除存档 {state_path} 后重新翻译。")
         state["source"] = str(input_path)
         state["total_chunks"] = len(chunks)
+        state["chunk_signature"] = signature
         state["chunk_chars"] = self.config.chunk_chars
         state["max_paragraph_chars"] = self.config.max_paragraph_chars
         state["metadata"] = metadata_to_dict(book.metadata)
