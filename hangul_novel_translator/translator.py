@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +46,15 @@ class TranslationResult:
     failed_chunks: int
     output_paths: list[Path]
 
+
+def _retry_chunk_config(state: dict, config: AppConfig) -> AppConfig:
+    """重试失败块时优先使用翻译时存档的分块参数，避免 chunk 错位。"""
+    kwargs: dict[str, Any] = {}
+    if isinstance(state.get("chunk_chars"), int) and state["chunk_chars"] > 0:
+        kwargs["chunk_chars"] = state["chunk_chars"]
+    if isinstance(state.get("max_paragraph_chars"), int) and state["max_paragraph_chars"] > 0:
+        kwargs["max_paragraph_chars"] = state["max_paragraph_chars"]
+    return replace(config, **kwargs) if kwargs else config
 
 def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
     chunks: list[Chunk] = []
@@ -216,6 +225,7 @@ class Translator:
         glossary: Glossary,
         *,
         auto_extract: bool | None = None,
+        output_stem: str | None = None,
     ) -> TranslationResult:
         input_path = Path(input_path)
         output_dir = Path(output_dir)
@@ -302,7 +312,7 @@ class Translator:
 
         translated_book = self._assemble(book, chunks, completed, failed, glossary)
         output_paths: list[Path] = []
-        base_stem = f"{book.title}.zh"
+        base_stem = f"{output_stem or book.title}.zh"
         if self.config.output_txt:
             txt_path = output_dir / f"{base_stem}.txt"
             book_to_txt(translated_book, txt_path, self.config.output_encoding)
@@ -320,6 +330,62 @@ class Translator:
             failed_chunks=len(failed),
             output_paths=output_paths,
         )
+
+    # ---------------- 失败块重试 ----------------
+    def retry_failed(
+        self,
+        state_path: str | Path,
+        glossary: Glossary,
+        *,
+        max_attempts: int = 3,
+    ) -> dict[str, int]:
+        """读取翻译状态存档中的失败块，逐个重试翻译（最多 max_attempts 次），
+        成功写回 completed 并移出 failed。返回 {"found", "recovered", "still_failed"}。"""
+        state_path = Path(state_path)
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        source = Path(str(data.get("source", "")))
+        if not source.exists():
+            raise ValueError(f"存档对应的原书不存在：{source}")
+        failed = data.get("failed") or {}
+        if not isinstance(failed, dict) or not failed:
+            return {"found": 0, "recovered": 0, "still_failed": 0}
+
+        book = load_book(source)
+        cfg = _retry_chunk_config(data, self.config)
+        chunks = build_chunks(book, cfg)
+        by_id = {chunk.id: chunk for chunk in chunks}
+
+        found = 0
+        recovered = 0
+        still_failed = 0
+        for chunk_id in list(failed.keys()):
+            chunk = by_id.get(chunk_id)
+            if chunk is None:
+                found += 1
+                still_failed += 1
+                continue
+            found += 1
+            ok = False
+            for _ in range(max_attempts):
+                if self.cancel_event.is_set():
+                    raise TranslationCancelled()
+                try:
+                    translated = self._translate_chunk(chunk, glossary)
+                except TranslationCancelled:
+                    raise
+                except Exception:  # noqa: BLE001
+                    continue
+                completed = data.setdefault("completed", {})
+                completed[chunk_id] = translated
+                failed.pop(chunk_id, None)
+                self._save_state(state_path, data)
+                ok = True
+                break
+            if ok:
+                recovered += 1
+            else:
+                still_failed += 1
+        return {"found": found, "recovered": recovered, "still_failed": still_failed}
 
     def _safe_process_one(self, chunk, glossary, completed, failed, state, state_path):
         try:

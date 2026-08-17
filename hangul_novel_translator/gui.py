@@ -20,7 +20,7 @@ from .config import AppConfig
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
-from .translator import TranslationCancelled, Translator, collect_sample_text
+from .translator import TranslationCancelled, TranslationResult, Translator, collect_sample_text
 
 
 class GlossaryEditDialog(ctk.CTkToplevel):
@@ -162,14 +162,50 @@ class App(ctk.CTk):
 
     def _build_left(self, parent):
         row = 0
-        ctk.CTkLabel(parent, text="书籍文件", anchor="w").grid(row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w")
-        self.input_var = tk.StringVar()
-        ctk.CTkEntry(parent, textvariable=self.input_var).grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
-        ctk.CTkButton(parent, text="选择 .txt / .epub", width=160, command=self._choose_input).grid(
-            row=row + 2, column=0, columnspan=2, padx=12, pady=4, sticky="w"
+        ctk.CTkLabel(parent, text="书籍文件（多本=同一小说的不同卷，按顺序）", anchor="w").grid(
+            row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w"
         )
+        self.input_files: list[Path] = []
+        input_style = ttk.Style(self)
+        input_style.configure("Input.Treeview", font=tkfont.Font(size=13), rowheight=30)
+        input_style.configure("Input.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
+        list_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        list_frame.grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
+        list_frame.grid_columnconfigure(0, weight=1)
+        self.input_tree = ttk.Treeview(
+            list_frame,
+            columns=("order", "file"),
+            show="headings",
+            height=7,
+            style="Input.Treeview",
+        )
+        self.input_tree.heading("order", text="序")
+        self.input_tree.heading("file", text="文件")
+        self.input_tree.column("order", width=40, anchor="center")
+        self.input_tree.column("file", width=330, anchor="w", stretch=True)
+        self.input_tree.grid(row=0, column=0, sticky="ew")
+        input_scroll = ctk.CTkScrollbar(list_frame, command=self.input_tree.yview)
+        input_scroll.grid(row=0, column=1, sticky="ns")
+        self.input_tree.configure(yscrollcommand=input_scroll.set)
+
+        btns = ctk.CTkFrame(parent, fg_color="transparent")
+        btns.grid(row=row + 2, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
+        ctk.CTkButton(btns, text="添加 .txt/.epub", width=112, command=self._add_input_files).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(btns, text="上移", width=56, command=lambda: self._move_input_file(-1)).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(btns, text="下移", width=56, command=lambda: self._move_input_file(1)).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(btns, text="移除", width=56, command=self._remove_input_files).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(btns, text="清空", width=56, command=self._clear_input_files).grid(row=0, column=4, padx=4)
 
         row += 3
+        ctk.CTkLabel(parent, text="小说名（可空，留空则按源文件名命名）", anchor="w").grid(
+            row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w"
+        )
+        self.novel_name_var = tk.StringVar(value="")
+        ctk.CTkEntry(parent, textvariable=self.novel_name_var).grid(
+            row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew"
+        )
+
+        row += 2
         ctk.CTkLabel(parent, text="输出目录", anchor="w").grid(row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w")
         self.output_var = tk.StringVar(value=str(Path.cwd() / "output"))
         ctk.CTkEntry(parent, textvariable=self.output_var).grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
@@ -346,10 +382,11 @@ class App(ctk.CTk):
         run_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
         ctk.CTkButton(run_frame, text="预览修正", width=110, command=self._merge_preview_async).grid(row=0, column=0, padx=4)
         ctk.CTkButton(run_frame, text="修正并输出", width=130, command=self._merge_run_async).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(run_frame, text="校验并重试", width=110, command=self._merge_retry_async).grid(row=0, column=2, padx=4)
 
         ctk.CTkLabel(
             parent,
-            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；修正按当前已加载词表执行（含译名历史自动替换）。",
+            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；修正按当前已加载词表执行（含译名历史自动替换）。点“校验并重试”可补翻失败块（最多 3 次/块），仍有失败块的存档不会参与“修正并输出”。",
             wraplength=620,
             justify="left",
             anchor="w",
@@ -375,13 +412,60 @@ class App(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     # ---------------- 基础操作 ----------------
-    def _choose_input(self):
-        path = filedialog.askopenfilename(
-            title="选择书籍",
+    def _add_input_files(self):
+        files = filedialog.askopenfilenames(
+            title="选择书籍（可多选，列表顺序即卷序）",
             filetypes=[("书籍文件", "*.txt *.epub"), ("文本文件", "*.txt"), ("EPUB", "*.epub")],
+            parent=self,
         )
-        if path:
-            self.input_var.set(path)
+        added = 0
+        for raw in files:
+            path = Path(raw)
+            if path in self.input_files:
+                continue
+            self.input_files.append(path)
+            added += 1
+        if added:
+            self.log(f"已添加 {added} 本书")
+        self._refresh_input_tree()
+
+    def _move_input_file(self, delta: int):
+        selection = self.input_tree.selection()
+        if not selection:
+            return
+        index = int(selection[0])
+        target = index + delta
+        if 0 <= target < len(self.input_files):
+            self.input_files[index], self.input_files[target] = (
+                self.input_files[target],
+                self.input_files[index],
+            )
+            self._refresh_input_tree()
+            self.input_tree.selection_set(str(target))
+
+    def _remove_input_files(self):
+        for iid in sorted(self.input_tree.selection(), key=int, reverse=True):
+            index = int(iid)
+            if 0 <= index < len(self.input_files):
+                del self.input_files[index]
+        self._refresh_input_tree()
+
+    def _clear_input_files(self):
+        self.input_files = []
+        self._refresh_input_tree()
+
+    def _refresh_input_tree(self):
+        for item in self.input_tree.get_children():
+            self.input_tree.delete(item)
+        for index, path in enumerate(self.input_files):
+            self.input_tree.insert("", "end", iid=str(index), values=(index + 1, str(path)))
+
+    def _output_stem_for(self, index: int, path: Path) -> str:
+        """多本输出文件名主名：填了小说名用“小说名 第X卷”，否则用源文件名（通常已含卷号）。"""
+        novel = self.novel_name_var.get().strip()
+        if novel:
+            return f"{novel} 第{index + 1}卷"
+        return path.stem
 
     def _choose_output(self):
         path = filedialog.askdirectory(title="选择输出目录")
@@ -552,9 +636,9 @@ class App(ctk.CTk):
             self.log(f"词表已加载：{path}，共 {len(self.glossary.entries)} 条{detail}")
 
     def _extract_glossary_async(self):
-        input_path = self.input_var.get().strip()
-        if not input_path:
-            messagebox.showwarning("提示", "请先选择输入文件", parent=self)
+        files = list(self.input_files)
+        if not files:
+            messagebox.showwarning("提示", "请先添加输入文件", parent=self)
             return
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
@@ -563,42 +647,14 @@ class App(ctk.CTk):
         self._set_busy(True)
         self.progress.set(0)
         self.status_var.set("提取词表中…")
-        self.log("开始提取专有名词词表")
-        self.worker = threading.Thread(target=self._extract_worker, args=(Path(input_path),), daemon=True)
+        self.log(f"开始提取词表：{len(files)} 本书")
+        self.worker = threading.Thread(target=self._extract_worker, args=(files, "new"), daemon=True)
         self.worker.start()
 
-    def _extract_worker(self, input_path: Path):
-        try:
-            config = self._config_from_ui()
-            book = load_book(input_path)
-            sample = collect_sample_text(book, config)
-            self.log(f"已读取样章 {len(sample)} 字，开始请求 LLM 提取词表")
-            llm = LLMClient(config)
-            glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
-            self.after(0, lambda: self._on_extract_done(glossary))
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            self.after(0, lambda: self._on_error(message))
-
-    def _on_extract_done(self, glossary: Glossary):
-        self.glossary = glossary
-        self._refresh_tree()
-        self._set_busy(False)
-        self.progress.set(1)
-        self.status_var.set("词表提取完成")
-        self.log(f"提取完成：{len(glossary.valid_entries())} 条有效词条，样章 {glossary.sample_chars} 字")
-        if not glossary.valid_entries():
-            snippet = (glossary.raw_response or "").strip().replace("\n", " ")[:500]
-            self.log(f"未解析到词条，模型原始返回：{snippet or '（空）'}")
-            messagebox.showwarning("未提取到词条", "没有解析到有效词条，请查看日志中的模型原始返回。", parent=self)
-        else:
-            messagebox.showinfo("完成", "词表提取完成，请人工确认后再开始翻译。", parent=self)
-
-    # ---------------- 词表（补充提取） ----------------
     def _extract_more_glossary_async(self):
-        input_path = self.input_var.get().strip()
-        if not input_path:
-            messagebox.showwarning("提示", "请先选择输入文件", parent=self)
+        files = list(self.input_files)
+        if not files:
+            messagebox.showwarning("提示", "请先添加输入文件", parent=self)
             return
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
@@ -610,51 +666,90 @@ class App(ctk.CTk):
         self._set_busy(True)
         self.progress.set(0)
         self.status_var.set("提取更多词表中…")
-        self.log("开始基于现有词表补充提取专有名词")
-        self.worker = threading.Thread(
-            target=self._extract_more_worker,
-            args=(Path(input_path),),
-            daemon=True,
-        )
+        self.log(f"开始基于现有词表补充提取：{len(files)} 本书")
+        self.worker = threading.Thread(target=self._extract_worker, args=(files, "more"), daemon=True)
         self.worker.start()
 
-    def _extract_more_worker(self, input_path: Path):
+    def _extract_worker(self, files: list[Path], mode: str):
+        """多本依次提取词表：mode=new 且当前词表为空时第一本新建，其余每本走“提取更多”追加；
+        mode=more 时所有书都追加到现有词表。单本失败继续下一本，最后统一汇总。"""
         try:
             config = self._config_from_ui()
-            book = load_book(input_path)
-            sample = collect_sample_text(book, config)
-            self.log(f"已读取样章 {len(sample)} 字，开始请求 LLM 补充词表")
-            llm = LLMClient(config)
-            new_glossary = extract_more_glossary(llm, sample, self.glossary, config.glossary_limit)
-            self.after(0, lambda: self._on_extract_more_done(new_glossary))
+            glossary = self.glossary
+            first_new = mode == "new" and not glossary.valid_entries()
+            stats: list[dict] = []
+            for index, path in enumerate(files):
+                if self.cancel_event.is_set():
+                    break
+                name = path.name
+                self.after(
+                    0,
+                    lambda i=index, n=len(files), nm=name: self.status_var.set(
+                        f"提取词表：第 {i + 1}/{n} 本 {nm}"
+                    ),
+                )
+                try:
+                    book = load_book(path)
+                    sample = collect_sample_text(book, config)
+                    self.log(f"第 {index + 1} 本 {name}：样章 {len(sample)} 字")
+                    llm = LLMClient(config)
+                    if first_new and index == 0:
+                        new_glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
+                        glossary = new_glossary
+                        stats.append(
+                            {"path": path, "mode": "new", "added": len(new_glossary.valid_entries())}
+                        )
+                    else:
+                        new_glossary = extract_more_glossary(llm, sample, glossary, config.glossary_limit)
+                        added, skipped = glossary.append_unique(new_glossary.valid_entries())
+                        stats.append({"path": path, "mode": "more", "added": added, "skipped": skipped})
+                except Exception as exc:  # noqa: BLE001
+                    stats.append({"path": path, "error": str(exc)})
+                    continue
+            self.after(
+                0,
+                lambda: self._on_extract_all_done(glossary, stats, stopped=self.cancel_event.is_set()),
+            )
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             self.after(0, lambda: self._on_error(message))
 
-    def _on_extract_more_done(self, new_glossary: Glossary):
-        before = {e.ko: e.zh for e in self.glossary.entries}
-        added, skipped = self.glossary.append_unique(new_glossary.valid_entries())
-        diff_zh = sum(
-            1 for e in new_glossary.valid_entries() if e.ko in before and before[e.ko] != e.zh
-        )
+    def _on_extract_all_done(self, glossary: Glossary, stats: list[dict], stopped: bool = False):
+        self.glossary = glossary
         self._refresh_tree()
         self._set_busy(False)
         self.progress.set(1)
-        self.status_var.set("词表补充完成")
-        self.log(
-            f"补充完成：新增 {added} 条，跳过重复 {skipped} 条，"
-            f"当前共 {len(self.glossary.valid_entries())} 条"
-        )
-        if diff_zh:
-            self.log(f"提示：{diff_zh} 条重复词的译名与现有词表不一致，已保留现有译名")
-        if added:
-            messagebox.showinfo(
-                "完成",
-                f"新增 {added} 条词条，已追加到当前词表末尾。\n跳过重复 {skipped} 条。",
+        self.status_var.set("词表提取完成" if not stopped else "提取已停止")
+        total_added = 0
+        errors: list[str] = []
+        for item in stats:
+            if item.get("error"):
+                errors.append(f"{item['path'].name}：{item['error']}")
+            else:
+                total_added += item.get("added", 0)
+        self.log(f"提取完成：累计新增 {total_added} 条，当前共 {len(glossary.valid_entries())} 条")
+        for error in errors:
+            self.log(f"提取失败：{error}")
+        lines = []
+        for index, item in enumerate(stats):
+            if item.get("error"):
+                lines.append(f"· {index + 1}. {item['path'].name} 失败：{item['error']}")
+            elif item["mode"] == "new":
+                lines.append(f"· {index + 1}. {item['path'].name} 新建词表 {item['added']} 条")
+            else:
+                lines.append(
+                    f"· {index + 1}. {item['path'].name} 新增 {item['added']} 条、跳过 {item['skipped']} 条"
+                )
+        if not stats:
+            messagebox.showinfo("提示", "没有处理任何书籍（可能已停止）。", parent=self)
+        elif errors:
+            messagebox.showwarning(
+                "完成（部分失败）",
+                "\n".join(lines) + "\n\n失败的书已跳过，其余已追加到词表。",
                 parent=self,
             )
         else:
-            messagebox.showinfo("提示", f"没有新增词条（跳过重复 {skipped} 条）。", parent=self)
+            messagebox.showinfo("完成", "\n".join(lines), parent=self)
 
     def _enrich_glossary_async(self):
         if self.worker and self.worker.is_alive():
@@ -688,12 +783,13 @@ class App(ctk.CTk):
     def _enrich_worker(self, do_alts: bool, do_nick: bool):
         try:
             config = self._config_from_ui()
-            input_path = self.input_var.get().strip()
-            if input_path and Path(input_path).exists():
-                book = load_book(Path(input_path))
-                source_text = "\n".join(ch.text for ch in book.chapters)
-            else:
-                source_text = self.glossary.source_text
+            source_text = self.glossary.source_text
+            if self.input_files:
+                try:
+                    book = load_book(self.input_files[0])
+                    source_text = "\n".join(ch.text for ch in book.chapters)
+                except Exception:  # noqa: BLE001
+                    pass
             llm = LLMClient(config)
             stats = enrich_glossary_with_nicknames(
                 llm,
@@ -803,6 +899,83 @@ class App(ctk.CTk):
                 detail = f"读取失败：{exc}"
             self.merge_tree.insert("", "end", iid=str(index), values=(index + 1, str(path), detail))
 
+    def _merge_retry_async(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+            return
+        selection = self.merge_tree.selection()
+        files = [self.merge_files[int(iid)] for iid in selection] if selection else list(self.merge_files)
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("校验并重试中…")
+        self.log(f"开始校验并重试：{len(files)} 个存档（每块最多重试 3 次）")
+        self.worker = threading.Thread(target=self._merge_retry_worker, args=(files,), daemon=True)
+        self.worker.start()
+
+    def _merge_retry_worker(self, files: list[Path]):
+        try:
+            config = self._config_from_ui()
+            translator = Translator(config, cancel_event=self.cancel_event)
+            stats: list[dict] = []
+            for path in files:
+                if self.cancel_event.is_set():
+                    break
+                try:
+                    result = translator.retry_failed(path, self.glossary, max_attempts=3)
+                    stats.append(
+                        {
+                            "path": path,
+                            "found": result["found"],
+                            "recovered": result["recovered"],
+                            "still_failed": result["still_failed"],
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    stats.append({"path": path, "error": str(exc)})
+            self.after(
+                0,
+                lambda: self._on_merge_retry_done(stats, stopped=self.cancel_event.is_set()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_merge_retry_done(self, stats: list[dict], stopped: bool = False):
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("校验重试已停止" if stopped else "校验重试完成")
+        self._refresh_merge_tree()
+        total_recovered = 0
+        still = 0
+        for item in stats:
+            if item.get("error"):
+                self.log(f"校验失败：{item['path'].name}：{item['error']}")
+            else:
+                total_recovered += item["recovered"]
+                still += item["still_failed"]
+                self.log(
+                    f"重试：{item['path'].name} 共 {item['found']} 块失败，"
+                    f"恢复 {item['recovered']} 块，仍失败 {item['still_failed']} 块"
+                )
+        if still:
+            self.log("以下存档仍有失败块，将不参与“修正并输出”：")
+            for item in stats:
+                if item.get("still_failed"):
+                    self.log(f"· {item['path'].name}（仍失败 {item['still_failed']} 块）")
+        messagebox.showinfo(
+            "校验重试完成",
+            f"共恢复 {total_recovered} 块，仍失败 {still} 块。\n"
+            "仍有失败块的存档不会参与“修正并输出”（详见日志）。",
+            parent=self,
+        )
+
     def _merge_preview_async(self):
         if not self.merge_files:
             messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
@@ -850,6 +1023,20 @@ class App(ctk.CTk):
         try:
             config = self._config_from_ui()
             files = list(self.merge_files)
+            if mode == "run":
+                usable: list[Path] = []
+                for path in files:
+                    info = inspect_state(path)
+                    if info["failed"]:
+                        self.log(
+                            f"跳过：{path.name} 仍有 {info['failed']} 块失败，不参与输出"
+                            "（请先点“校验并重试”补翻）"
+                        )
+                    else:
+                        usable.append(path)
+                if not usable:
+                    raise ValueError("没有可输出的存档：所选存档都存在失败块，请先点“校验并重试”")
+                files = usable
             books = [book_from_state(p, config) for p in files]
             self.after(0, lambda: self.progress.set(0.6))
             if mode == "preview":
@@ -905,10 +1092,10 @@ class App(ctk.CTk):
         )
     # ---------------- 翻译 ----------------
     def _start_translation(self):
-        input_path = self.input_var.get().strip()
+        files = [Path(p) for p in self.input_files]
         output_dir = self.output_var.get().strip()
-        if not input_path or not Path(input_path).exists():
-            messagebox.showwarning("提示", "请先选择有效的输入文件", parent=self)
+        if not files:
+            messagebox.showwarning("提示", "请先添加输入文件", parent=self)
             return
         if not output_dir:
             messagebox.showwarning("提示", "请选择输出目录", parent=self)
@@ -927,60 +1114,157 @@ class App(ctk.CTk):
         self._set_busy(True)
         self.progress.set(0)
         self.status_var.set("准备翻译…")
-        self.log(f"开始翻译：{input_path}")
+        self.log(f"开始翻译：{len(files)} 本书")
         glossary = self.glossary
         self.worker = threading.Thread(
             target=self._translation_worker,
-            args=(Path(input_path), Path(output_dir), config, glossary),
+            args=(files, Path(output_dir), config, glossary),
             daemon=True,
         )
         self.worker.start()
 
-    def _translation_worker(self, input_path: Path, output_dir: Path, config: AppConfig, glossary: Glossary):
-        translator = Translator(
-            config,
-            progress_callback=self._progress_from_worker,
-            cancel_event=self.cancel_event,
-        )
+    def _translation_worker(
+        self,
+        files: list[Path],
+        output_dir: Path,
+        config: AppConfig,
+        glossary: Glossary,
+    ):
+        """多本逐本翻译：失败继续下一本，最后汇总失败清单；每本按“小说名 第X卷”或源文件名输出。"""
+        total_books = len(files)
+        results: list[TranslationResult] = []
+        failed_books: list[dict] = []
+        cancelled = False
         try:
-            result = translator.translate_file(input_path, output_dir, glossary)
-            self.after(0, lambda: self._on_translation_done(result))
-        except TranslationCancelled:
-            self.after(0, self._on_cancelled)
+            for index, path in enumerate(files):
+                if self.cancel_event.is_set():
+                    cancelled = True
+                    break
+                name = path.name
+                self.after(
+                    0,
+                    lambda i=index, n=total_books, nm=name: self.status_var.set(
+                        f"翻译中：第 {i + 1}/{n} 本 {nm}"
+                    ),
+                )
+
+                def progress_cb(stage, done, total, message, i=index, n=total_books):
+                    ratio = (done / total) if total else 0
+                    self.after(
+                        0,
+                        lambda s=stage, d=done, t=total, m=message, r=ratio, i=i, n=n: self._set_progress(
+                            s, d, t, m, ratio=r, book_index=i, total_books=n
+                        ),
+                    )
+
+                translator = Translator(
+                    config,
+                    progress_callback=progress_cb,
+                    cancel_event=self.cancel_event,
+                )
+
+                # 翻译前自动提取词表：空词表时第一本新建、其余追加。
+                if config.extract_glossary and not glossary.valid_entries():
+                    try:
+                        llm = LLMClient(config)
+                        book = load_book(path)
+                        sample = collect_sample_text(book, config)
+                        self.log(f"自动提取词表：{name} 样章 {len(sample)} 字")
+                        if index == 0:
+                            glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
+                            self.log(f"已新建词表：{len(glossary.valid_entries())} 条")
+                        else:
+                            new_glossary = extract_more_glossary(llm, sample, glossary, config.glossary_limit)
+                            added, skipped = glossary.append_unique(new_glossary.valid_entries())
+                            self.log(f"已追加词表：新增 {added} 条、跳过 {skipped} 条")
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f"自动提取词表失败（继续翻译）：{name}：{exc}")
+
+                try:
+                    result = translator.translate_file(
+                        path,
+                        output_dir,
+                        glossary,
+                        output_stem=self._output_stem_for(index, path),
+                    )
+                    results.append(result)
+                    self.log(
+                        f"完成：{name} 成功 {result.completed_chunks}/{result.total_chunks} 块，"
+                        f"失败 {result.failed_chunks} 块"
+                    )
+                    if result.failed_chunks:
+                        failed_books.append(
+                            {"path": path, "reason": f"{result.failed_chunks} 块失败（已保留原文并输出）"}
+                        )
+                except TranslationCancelled:
+                    cancelled = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    failed_books.append({"path": path, "reason": str(exc)})
+                    self.log(f"失败：{name}：{exc}")
+                    continue
+            self.after(
+                0,
+                lambda: self._on_translation_batch_done(results, failed_books, cancelled=cancelled),
+            )
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
             self.after(0, lambda: self._on_error(message))
 
-    def _progress_from_worker(self, stage: str, done: int, total: int, message: str):
-        # 工作线程中调用，通过 after 回到 Tk 主线程。
-        self.after(
-            0,
-            lambda: self._set_progress(stage, done, total, message),
-        )
-
-    def _set_progress(self, stage: str, done: int, total: int, message: str):
-        ratio = (done / total) if total else 0
+    def _set_progress(
+        self,
+        stage: str,
+        done: int,
+        total: int,
+        message: str,
+        *,
+        ratio: float | None = None,
+        book_index: int | None = None,
+        total_books: int | None = None,
+    ):
+        if ratio is None:
+            ratio = (done / total) if total else 0
+        if book_index is not None and total_books:
+            ratio = (book_index + ratio) / total_books
         self.progress.set(max(0.0, min(1.0, ratio)))
-        self.status_var.set(f"{stage}：{done}/{total}  {message}")
+        if book_index is not None and total_books and book_index + 1 < total_books:
+            label = f"第 {book_index + 1}/{total_books} 本 · {stage}"
+        else:
+            label = stage
+        self.status_var.set(f"{label}：{done}/{total}  {message}")
         if message and (done == 0 or done == total):
-            self.log(f"{stage}：{message}")
+            self.log(f"{label}：{message}")
 
-    def _on_translation_done(self, result):
+    def _on_translation_batch_done(
+        self,
+        results: list[TranslationResult],
+        failed_books: list[dict],
+        cancelled: bool = False,
+    ):
         self._set_busy(False)
         self.progress.set(1)
-        self.status_var.set("翻译完成")
-        self.log(f"翻译完成：{result.completed_chunks}/{result.total_chunks} 块成功")
-        for path in result.output_paths:
-            self.log(f"输出：{path}")
-        if result.failed_chunks:
+        self.status_var.set("已停止" if cancelled else "翻译完成")
+        total_ok = sum(r.completed_chunks for r in results)
+        for result in results:
+            for path in result.output_paths:
+                self.log(f"输出：{path}")
+        if cancelled:
+            self.log(f"任务已停止：完成 {len(results)} 本，失败/未完成 {len(failed_books)} 本")
+            return
+        if failed_books:
+            self.log(f"翻译完成（有失败）：成功 {len(results)} 本，失败 {len(failed_books)} 本")
+            for item in failed_books:
+                self.log(f"失败：{item['path'].name}：{item['reason']}")
             messagebox.showwarning(
-                "完成（有失败块）",
-                f"成功 {result.completed_chunks}/{result.total_chunks} 块，失败 {result.failed_chunks} 块。\n"
-                "失败块已保留原文，可再次点击“开始翻译”续传。",
+                "完成（部分失败）",
+                f"成功 {len(results)} 本，失败 {len(failed_books)} 本。\n"
+                + "\n".join(f"· {item['path'].name}：{item['reason']}" for item in failed_books)
+                + "\n\n失败块可在“多卷修正”tab 添加对应存档后点“校验并重试”补翻。",
                 parent=self,
             )
         else:
-            messagebox.showinfo("完成", "翻译完成。", parent=self)
+            self.log(f"翻译完成：{len(results)} 本，累计成功 {total_ok} 块")
+            messagebox.showinfo("完成", f"全部完成：{len(results)} 本。", parent=self)
 
     def _on_cancelled(self):
         self._set_busy(False)
