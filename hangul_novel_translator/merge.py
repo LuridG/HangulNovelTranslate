@@ -74,13 +74,18 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
     return Book(title=book.title, chapters=chapters, source_path=book.source_path)
 
 
-def merge_books(books: list[Book]) -> Book:
-    """按顺序拼合多卷为一部书，章节序号重新编号。"""
+def merge_books(books: list[Book], *, title: str = "") -> Book:
+    """按顺序拼合多卷为一部书：每卷开头插入“{书名} 第X卷”章节，章节序号重新编号。"""
     chapters: list[Chapter] = []
-    for index, chapter in enumerate(ch for b in books for ch in b.chapters):
-        chapters.append(Chapter(index, chapter.title, chapter.paragraphs, chapter.source_id))
+    prefix = f"{title.strip()} " if title.strip() else ""
+    for index, book in enumerate(books, start=1):
+        chapters.append(Chapter(len(chapters), f"{prefix}第{index}卷", []))
+        for chapter in book.chapters:
+            chapters.append(
+                Chapter(len(chapters), chapter.title, chapter.paragraphs, chapter.source_id)
+            )
     titles = [b.title for b in books if b.title]
-    return Book(title="、".join(titles), chapters=chapters)
+    return Book(title=title.strip() or "、".join(titles), chapters=chapters)
 
 
 def preview_fix(book: Book, glossary: Glossary) -> dict[str, int]:
@@ -119,7 +124,7 @@ def export_merged(
     """合并多卷 → 按词表修正 → 输出 TXT/EPUB，返回统计与输出路径。"""
     if not books:
         raise ValueError("没有可合并的存档")
-    merged = merge_books(books)
+    merged = merge_books(books, title=title)
     fix_stats = fix_book(merged, glossary)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -67,14 +67,21 @@ class MergeLogicTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 book_from_state(state, AppConfig())
 
-    def test_merge_books_reorders_chapters(self):
+    def test_merge_books_inserts_volume_headings(self):
         b1 = Book(title="卷一", chapters=[Chapter(0, "第1章", ["a"])])
         b2 = Book(title="卷二", chapters=[Chapter(0, "第2章", ["b"]), Chapter(1, "第3章", ["c"])])
-        merged = merge_books([b1, b2])
-        self.assertEqual([ch.title for ch in merged.chapters], ["第1章", "第2章", "第3章"])
-        self.assertEqual([ch.index for ch in merged.chapters], [0, 1, 2])
-        self.assertIn("卷一", merged.title)
-        self.assertIn("卷二", merged.title)
+        merged = merge_books([b1, b2], title="测试合集")
+        self.assertEqual(
+            [ch.title for ch in merged.chapters],
+            ["测试合集 第1卷", "第1章", "测试合集 第2卷", "第2章", "第3章"],
+        )
+        self.assertEqual([ch.index for ch in merged.chapters], [0, 1, 2, 3, 4])
+        self.assertEqual(merged.title, "测试合集")
+
+    def test_merge_books_volume_heading_without_prefix(self):
+        b1 = Book(title="卷一", chapters=[Chapter(0, "第1章", ["a"])])
+        merged = merge_books([b1])
+        self.assertEqual([ch.title for ch in merged.chapters], ["第1卷", "第1章"])
 
     def test_preview_fix_does_not_modify(self):
         book = Book(title="测试", chapters=[Chapter(0, "第1章", ["崔范镇来了。"])])
@@ -122,6 +129,8 @@ class MergeLogicTest(unittest.TestCase):
             self.assertIn("崔凡镇来了。", content)
             self.assertIn("第1章", content)
             self.assertIn("第2章", content)
+            self.assertIn("合集 第1卷", content)
+            self.assertIn("合集 第2卷", content)
 
     def test_export_merged_requires_books(self):
         with self.assertRaises(ValueError):
