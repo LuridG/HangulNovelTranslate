@@ -85,11 +85,11 @@ def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
 
 
 def collect_sample_text(book: Book, config: AppConfig) -> str:
-    """取前几章/前 N 字用于词表提取。"""
+    """取字数最多的前几章、累计前 N 字用于词表提取，避免采到目录/版权页等短文档。"""
     sample: list[str] = []
     chars = 0
     limit_chapters = min(config.extract_sample_chapters, len(book.chapters))
-    for chapter in book.chapters[:limit_chapters]:
+    for chapter in sorted(book.chapters, key=len, reverse=True)[:limit_chapters]:
         for paragraph in chapter.paragraphs:
             sample.append(paragraph)
             chars += len(paragraph)

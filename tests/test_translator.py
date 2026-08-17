@@ -43,6 +43,19 @@ class TranslatorLogicTest(unittest.TestCase):
         self.assertIn("가", sample)
         self.assertGreater(len(sample), 0)
 
+    def test_collect_sample_prefers_longest_chapter(self):
+        book = Book(
+            title="测试",
+            chapters=[
+                Chapter(0, "목차", ["목차"]),
+                Chapter(1, "제1장", ["가나다라마바사" * 1000]),
+            ],
+        )
+        config = AppConfig(extract_sample_chars=200, extract_sample_chapters=2)
+        sample = collect_sample_text(book, config)
+        self.assertNotIn("목차", sample)
+        self.assertIn("가나다라마바사", sample)
+
 
 if __name__ == "__main__":
     unittest.main()
