@@ -123,6 +123,15 @@ class GlossaryReplacementTest(unittest.TestCase):
         self.assertEqual(entry.alternatives, "")
         self.assertEqual(entry.alternative_list(), [])
 
+    def test_single_char_alternative_skipped(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="熙"),
+            ]
+        )
+        # 单字变体不参与替换；韩文原词仍正常替换。
+        self.assertEqual(glossary.apply_replacements("熙来了。준희가 왔다."), "熙来了。俊熙가 왔다.")
+
 
 if __name__ == "__main__":
     unittest.main()

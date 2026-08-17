@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .book import load_book
 from .config import AppConfig
-from .glossary import Glossary, GlossaryEntry, extract_glossary_with_llm, extract_more_glossary
+from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
@@ -80,6 +80,16 @@ class GlossaryEditDialog(ctk.CTkToplevel):
                 zh = first
             else:
                 messagebox.showwarning("提示", "中文译名不能为空（可先填写“可能翻译”，自动取第一个作为译名）", parent=self)
+                return
+        short = [x.strip() for x in alternatives.split(",") if x.strip() and len(x.strip()) < 3]
+        if short:
+            if not messagebox.askyesno(
+                "提示",
+                "以下“可能翻译”过短（1-2 字），回传时容易被误替换：\n"
+                + "、".join(short)
+                + "\n\n建议写得更完整（例如补上姓氏）后再确认。\n仍要保存吗？",
+                parent=self,
+            ):
                 return
         self.result = GlossaryEntry(
             ko=ko,

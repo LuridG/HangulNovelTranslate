@@ -10,6 +10,9 @@ from typing import Any
 from .llm import LLMClient
 from .utils import extract_json, parse_paragraphs_from_payload
 
+# 可能译法参与替换的最短长度：单字变体几乎必是常用字，跳过以避免误替换。
+_MIN_ALTERNATIVE_LEN = 2
+
 
 @dataclass
 class GlossaryEntry:
@@ -142,7 +145,8 @@ class Glossary:
             pairs.append((entry.ko, entry.zh))
             if entry.confirmed:
                 for alt in entry.alternative_list():
-                    pairs.append((alt, entry.zh))
+                    if len(alt) >= _MIN_ALTERNATIVE_LEN:
+                        pairs.append((alt, entry.zh))
         # 按字符串长度降序，避免短词先替换破坏长词。
         for src, dst in sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True):
             if src and src in text:
