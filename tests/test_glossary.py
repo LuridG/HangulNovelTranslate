@@ -7,10 +7,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hangul_novel_translator.glossary import (
     EXTRACTION_MORE_SYSTEM,
     EXTRACTION_SYSTEM,
+    JUDGE_SHORT_SYSTEM,
     Glossary,
     GlossaryEntry,
     enrich_glossary,
     extract_more_glossary,
+    judge_short_forms,
     payload_to_glossary,
 )
 
@@ -232,6 +234,90 @@ class ShortNameReplacementTest(unittest.TestCase):
         entry = GlossaryEntry.from_dict({"ko": "a", "zh": "b"})
         self.assertFalse(entry.replace_short)
 
+
+class JudgeShortFormsTest(unittest.TestCase):
+    def test_sends_only_short_form_candidates(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="범진", zh="崔范镇", confirmed=True, alternatives="范镇"),
+                GlossaryEntry(ko="제원", zh="宰元", confirmed=True, alternatives="宰沅"),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"범진","replace_short":false}]}')
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 0})
+        # 只有含短称（全名字串）的词条被发送给 LLM。
+        user = llm.calls[0][1]["content"]
+        self.assertIn("범진", user)
+        self.assertIn("崔范镇", user)
+        self.assertIn("短称=范镇", user)
+        self.assertNotIn("제원", user)
+        self.assertNotIn("宰元", user)
+        self.assertIn("replace_short", llm.calls[0][0]["content"])
+        self.assertIn("亲昵", JUDGE_SHORT_SYSTEM)
+
+    def test_updates_replace_short_flag(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="범진", zh="崔范镇", confirmed=True, alternatives="范镇,范振"),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"범진","replace_short":true}]}')
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 1})
+        self.assertTrue(glossary.entries[0].replace_short)
+
+    def test_no_candidates_skips_llm(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="제원", zh="宰元", confirmed=True, alternatives="宰沅,在元"),
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True),
+            ]
+        )
+        llm = FakeLLM("{}")
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 0})
+        self.assertEqual(llm.calls, [])
+
+    def test_unmatched_ko_skipped(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="범진", zh="崔范镇", confirmed=True, alternatives="范镇"),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"없는단어","replace_short":true}]}')
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 0})
+        self.assertFalse(glossary.entries[0].replace_short)
+
+    def test_matching_by_ko_not_zh(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="범진", zh="崔范镇", confirmed=True, alternatives="范镇"),
+            ]
+        )
+        # 模型返回中文译名而不是 ko 时不应命中。
+        llm = FakeLLM('{"entries":[{"ko":"崔范镇","replace_short":true}]}')
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 0})
+        self.assertFalse(glossary.entries[0].replace_short)
+
+    def test_string_boolean_parsed(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(
+                    ko="범진",
+                    zh="崔范镇",
+                    confirmed=True,
+                    alternatives="范镇",
+                    replace_short=True,
+                ),
+            ]
+        )
+        llm = FakeLLM('{"entries":[{"ko":"범진","replace_short":"false"}]}')
+        stats = judge_short_forms(llm, glossary)
+        self.assertEqual(stats, {"updated": 1})
+        self.assertFalse(glossary.entries[0].replace_short)
 
 if __name__ == "__main__":
     unittest.main()

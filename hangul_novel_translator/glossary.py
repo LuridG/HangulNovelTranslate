@@ -383,6 +383,74 @@ def enrich_glossary(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
     return {"updated_alts": updated_alts, "updated_notes": updated_notes}
 
 
+JUDGE_SHORT_SYSTEM = """你是一名资深的韩语小说中文译者与编辑。用户有一份专有名词词表，其中部分词条的可能译法里含有“短称”（不带姓、只有名字的称呼，例如“崔范镇”的短称“范镇”）。
+在小说里，人物关系亲密时常常只叫名字（短称），这是有意的写法；但有时短称只是译名不一致或漏字，需要统一为全名。
+
+【任务】
+对用户给出的每个词条，判断它的短称是“有意的亲昵称呼”（应保留，replace_short=false）还是“应统一为全名”（replace_short=true）。
+判断依据：
+- 短称作为人物间的称呼出现，且整体以名字互称 → 有意的亲昵称呼，保留。
+- 短称明显是译名不一致或漏字 → 统一为全名。
+- 拿不准时倾向“保留”（false），避免破坏原文的亲昵感。
+
+【输出格式】
+只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。
+字段：ko=韩文原词（必须与输入完全一致），replace_short=布尔值。
+示例：{"entries":[{"ko":"범진","replace_short":false}]}"""
+
+
+def judge_short_forms(llm: LLMClient, glossary: Glossary) -> dict[str, int]:
+    """让 LLM 判断存在短称的词条是否应把短称替换为全名，返回更新统计。"""
+    candidates: list[tuple[GlossaryEntry, list[str]]] = []
+    for entry in glossary.valid_entries():
+        short_alts = [alt for alt in entry.alternative_list() if alt in entry.zh]
+        if short_alts:
+            candidates.append((entry, short_alts))
+    if not candidates:
+        return {"updated": 0}
+
+    lines: list[str] = []
+    for entry, short_alts in candidates:
+        lines.append(f"- ko={entry.ko} | zh={entry.zh} | 短称={','.join(short_alts)}")
+    user = (
+        "请判断下列词条的短称是否为有意的亲昵称呼：\n\n"
+        + "\n".join(lines)
+        + "\n\n只输出一个 JSON 对象，每个词条的 ko 必须与输入完全一致。"
+    )
+    messages = [
+        {"role": "system", "content": JUDGE_SHORT_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    raw_response = llm.chat(messages, temperature=0.1, json_mode=True)
+    try:
+        payload = extract_json(raw_response)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"模型没有返回合法 JSON：{raw_response[:300]}") from exc
+
+    raw_entries = payload.get("entries") if isinstance(payload, dict) else payload
+    if not isinstance(raw_entries, list):
+        raise ValueError("模型返回结构不正确：缺少 entries 数组")
+
+    by_ko = {e.ko: e for e in glossary.entries}
+    updated = 0
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        ko = str(item.get("ko", "")).strip()
+        target = by_ko.get(ko)
+        raw_value = item.get("replace_short")
+        if target is None or raw_value is None:
+            continue
+        if isinstance(raw_value, str):
+            new_value = raw_value.strip().lower() in ("true", "1", "yes")
+        else:
+            new_value = bool(raw_value)
+        if target.replace_short != new_value:
+            target.replace_short = new_value
+            updated += 1
+    return {"updated": updated}
+
+
 def payload_to_glossary(payload: Any, source_text: str = "") -> Glossary:
     glossary = Glossary(source_text=source_text)
     if isinstance(payload, list):
