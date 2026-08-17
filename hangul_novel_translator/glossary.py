@@ -18,6 +18,7 @@ class GlossaryEntry:
     kind: str = "term"
     note: str = ""
     confirmed: bool = False
+    alternatives: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -30,7 +31,12 @@ class GlossaryEntry:
             kind=str(data.get("kind", "term")).strip() or "term",
             note=str(data.get("note", "")).strip(),
             confirmed=bool(data.get("confirmed", False)),
+            alternatives=str(data.get("alternatives", "")).strip(),
         )
+
+    def alternative_list(self) -> list[str]:
+        """把半角逗号分隔的可能译法解析为列表（去掉空项）。"""
+        return [x.strip() for x in self.alternatives.split(",") if x.strip()]
 
 
 @dataclass
@@ -128,12 +134,19 @@ class Glossary:
         return "\n".join(lines) if lines else "（无）"
 
     def apply_replacements(self, text: str) -> str:
-        """翻译后再做一层保底替换，防止模型偶尔保留韩文专名。"""
+        """翻译后再做一层保底替换：韩文专名替换为人工译名；
+        已确认词条的可能误译（alternatives）也会替换为人工译名，作为对 LLM 的机器矫正。"""
+        # 收集 (源词, 目标译名) 并去重。
+        pairs: list[tuple[str, str]] = []
+        for entry in self.valid_entries():
+            pairs.append((entry.ko, entry.zh))
+            if entry.confirmed:
+                for alt in entry.alternative_list():
+                    pairs.append((alt, entry.zh))
         # 按字符串长度降序，避免短词先替换破坏长词。
-        ordered = sorted(self.valid_entries(), key=lambda e: len(e.ko), reverse=True)
-        for entry in ordered:
-            if entry.ko in text:
-                text = text.replace(entry.ko, entry.zh)
+        for src, dst in sorted(set(pairs), key=lambda pair: len(pair[0]), reverse=True):
+            if src and src in text:
+                text = text.replace(src, dst)
         return text
 
 

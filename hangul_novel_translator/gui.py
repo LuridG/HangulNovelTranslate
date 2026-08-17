@@ -26,7 +26,7 @@ class GlossaryEditDialog(ctk.CTkToplevel):
     def __init__(self, master, entry: GlossaryEntry | None = None):
         super().__init__(master)
         self.title("编辑词条")
-        self.geometry("480x360")
+        self.geometry("520x430")
         self.grab_set()
         self.result: GlossaryEntry | None = None
         self.entry = entry or GlossaryEntry("", "", "term")
@@ -54,27 +54,40 @@ class GlossaryEditDialog(ctk.CTkToplevel):
         self.note_var = tk.StringVar(value=self.entry.note)
         ctk.CTkEntry(self, textvariable=self.note_var).grid(row=3, column=1, padx=12, pady=6, sticky="ew")
 
+        ctk.CTkLabel(self, text="可能翻译（半角逗号分隔）").grid(row=4, column=0, padx=12, pady=6, sticky="w")
+        self.alt_var = tk.StringVar(value=self.entry.alternatives)
+        ctk.CTkEntry(self, textvariable=self.alt_var).grid(row=4, column=1, padx=12, pady=6, sticky="ew")
+
         self.confirmed_var = tk.BooleanVar(value=self.entry.confirmed)
         ctk.CTkCheckBox(self, text="已人工确认", variable=self.confirmed_var).grid(
-            row=4, column=0, columnspan=2, padx=12, pady=12, sticky="w"
+            row=5, column=0, columnspan=2, padx=12, pady=12, sticky="w"
         )
 
         ctk.CTkButton(self, text="确定", command=self._ok).grid(
-            row=5, column=0, columnspan=2, pady=16
+            row=6, column=0, columnspan=2, pady=16
         )
 
     def _ok(self):
         ko = self.ko_var.get().strip()
         zh = self.zh_var.get().strip()
-        if not ko or not zh:
-            messagebox.showwarning("提示", "韩文原文和中文译名不能为空", parent=self)
+        alternatives = self.alt_var.get().strip()
+        if not ko:
+            messagebox.showwarning("提示", "韩文原文不能为空", parent=self)
             return
+        if not zh:
+            first = next((x.strip() for x in alternatives.split(",") if x.strip()), "")
+            if first:
+                zh = first
+            else:
+                messagebox.showwarning("提示", "中文译名不能为空（可先填写“可能翻译”，自动取第一个作为译名）", parent=self)
+                return
         self.result = GlossaryEntry(
             ko=ko,
             zh=zh,
             kind=self.kind_var.get().strip() or "term",
             note=self.note_var.get().strip(),
             confirmed=self.confirmed_var.get(),
+            alternatives=alternatives,
         )
         self.destroy()
 
@@ -194,7 +207,7 @@ class App(ctk.CTk):
         style.configure("Glossary.Treeview", font=tkfont.Font(size=13), rowheight=34)
         style.configure("Glossary.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
 
-        columns = ("ko", "zh", "kind", "note", "confirmed")
+        columns = ("ko", "zh", "kind", "note", "alternatives", "confirmed")
         self.tree = ttk.Treeview(
             tree_frame,
             columns=columns,
@@ -208,12 +221,25 @@ class App(ctk.CTk):
             "zh": "中文译名",
             "kind": "类型",
             "note": "备注",
+            "alternatives": "可能译法",
             "confirmed": "确认",
+        }
+        widths = {
+            "ko": 150,
+            "zh": 150,
+            "kind": 70,
+            "note": 110,
+            "alternatives": 130,
+            "confirmed": 60,
         }
         for col in columns:
             self.tree.heading(col, text=headings[col])
-            width = 200 if col in ("ko", "zh") else 80
-            self.tree.column(col, width=width, anchor="w", stretch=(col in ("ko", "zh", "note")))
+            self.tree.column(
+                col,
+                width=widths[col],
+                anchor="w",
+                stretch=(col in ("ko", "zh", "note", "alternatives")),
+            )
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(tree_frame, command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
@@ -309,7 +335,7 @@ class App(ctk.CTk):
             self.tree.insert(
                 "",
                 "end",
-                values=(e.ko, e.zh, e.kind, e.note, "✓" if e.confirmed else ""),
+                values=(e.ko, e.zh, e.kind, e.note, e.alternatives, "✓" if e.confirmed else ""),
             )
         self.count_label.configure(text=f"{len(self.glossary.valid_entries())} 条有效词条")
 

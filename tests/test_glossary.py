@@ -84,5 +84,45 @@ class ExtractMoreGlossaryTest(unittest.TestCase):
             extract_more_glossary(llm, "   ", Glossary(), limit=10)
 
 
+class GlossaryReplacementTest(unittest.TestCase):
+    def test_alternative_list_parsing(self):
+        entry = GlossaryEntry(ko="준희", zh="俊熙", alternatives="俊希, 俊曦 ,,俊熙2")
+        self.assertEqual(entry.alternative_list(), ["俊希", "俊曦", "俊熙2"])
+        self.assertEqual(GlossaryEntry(ko="a", zh="b", alternatives="  ").alternative_list(), [])
+
+    def test_apply_replacements_ko_and_alternatives(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希,俊曦"),
+            ]
+        )
+        text = "俊希来了。俊曦也来了。준희가 왔다."
+        self.assertEqual(glossary.apply_replacements(text), "俊熙来了。俊熙也来了。俊熙가 왔다.")
+
+    def test_apply_replacements_alternatives_only_confirmed(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=False, alternatives="俊希"),
+            ]
+        )
+        # 未确认词条：韩文原词仍替换，但可能译法不参与替换。
+        self.assertEqual(glossary.apply_replacements("俊希来了。준희가 왔다."), "俊希来了。俊熙가 왔다.")
+
+    def test_apply_replacements_long_first(self):
+        glossary = Glossary(
+            entries=[
+                GlossaryEntry(ko="김준희", zh="金俊熙", confirmed=True, alternatives="金俊希,俊希"),
+            ]
+        )
+        text = "金俊希是主角，俊希也出现了。"
+        # 长词“金俊希”先于“俊希”替换，避免破坏长词。
+        self.assertEqual(glossary.apply_replacements(text), "金俊熙是主角，金俊熙也出现了。")
+
+    def test_from_dict_missing_alternatives_default(self):
+        entry = GlossaryEntry.from_dict({"ko": "a", "zh": "b"})
+        self.assertEqual(entry.alternatives, "")
+        self.assertEqual(entry.alternative_list(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
