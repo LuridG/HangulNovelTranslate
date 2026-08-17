@@ -86,6 +86,36 @@ class Glossary:
     def remove(self, ko: str) -> None:
         self.entries = [e for e in self.entries if e.ko != ko]
 
+    def append_unique(self, entries: list[GlossaryEntry]) -> tuple[int, int]:
+        """追加新词条并自动去重（以韩文原文为准，已存在的保持原样）；返回 (新增数, 跳过数)。"""
+        existing_kos = {e.ko for e in self.entries}
+        added = 0
+        skipped = 0
+        for entry in entries:
+            if not entry.ko or not entry.zh:
+                continue
+            if entry.ko in existing_kos:
+                skipped += 1
+                continue
+            self.entries.append(entry)
+            existing_kos.add(entry.ko)
+            added += 1
+        return added, skipped
+
+    def dedupe(self) -> int:
+        """移除韩文原文重复的词条（保留第一条）；返回移除条数。"""
+        seen: set[str] = set()
+        kept: list[GlossaryEntry] = []
+        removed = 0
+        for entry in self.entries:
+            if not entry.ko or entry.ko in seen:
+                removed += 1
+                continue
+            seen.add(entry.ko)
+            kept.append(entry)
+        self.entries = kept
+        return removed
+
     def to_prompt_lines(self) -> list[str]:
         lines: list[str] = []
         for e in self.valid_entries():
@@ -126,6 +156,54 @@ def extract_glossary_with_llm(llm: LLMClient, sample_text: str, limit: int) -> G
     )
     messages = [
         {"role": "system", "content": EXTRACTION_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    raw_response = llm.chat(messages, temperature=0.1, json_mode=True)
+    try:
+        payload = extract_json(raw_response)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"模型没有返回合法 JSON：{raw_response[:300]}") from exc
+
+    glossary = payload_to_glossary(payload, source_text=sample_text)
+    glossary.raw_response = raw_response
+    glossary.sample_chars = len(sample)
+    glossary.entries = glossary.entries[:limit]
+    return glossary
+
+
+EXTRACTION_MORE_SYSTEM = """你是一名韩语小说编辑。用户已经维护了一份专有名词词表，现在需要你根据新的样章补充更多专有名词。
+要求：
+1. 只提取【现有词表中还没有】的新专有名词：人名、地名、组织、种族、特殊称谓、作品内设定术语、固定物品名。
+2. 不要重复已有词表中的词，也不要提取普通动词、形容词、常见词。
+3. 只输出 JSON，不要输出解释或 Markdown。格式：
+{"entries":[{"ko":"韩文原词","zh":"建议中文译名","kind":"person|place|org|term|title","note":"简短备注"}]}"""
+
+
+def extract_more_glossary(
+    llm: LLMClient,
+    sample_text: str,
+    existing: Glossary,
+    limit: int,
+) -> Glossary:
+    """基于已有词表 + 新样章，提取词表中还没有的更多专有名词。"""
+    sample = sample_text.strip()
+    if not sample:
+        raise ValueError("没有读取到可用样章，无法提取词表。请确认 EPUB/TXT 已成功解析。")
+
+    existing_lines = []
+    for entry in existing.valid_entries():
+        mark = "（已确认）" if entry.confirmed else "（待确认）"
+        existing_lines.append(f"- {entry.ko} -> {entry.zh} [{entry.kind}]{mark}")
+    existing_text = "\n".join(existing_lines) if existing_lines else "（无）"
+
+    user = (
+        "现有词表：\n"
+        f"{existing_text}\n\n"
+        "请从下面这段新的小说样章中提取【现有词表中还没有的】专有名词。"
+        f"最多提取 {limit} 条，按出现频率和重要性排序。原文如下：\n\n{sample[:200000]}"
+    )
+    messages = [
+        {"role": "system", "content": EXTRACTION_MORE_SYSTEM},
         {"role": "user", "content": user},
     ]
     raw_response = llm.chat(messages, temperature=0.1, json_mode=True)

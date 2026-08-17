@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from .book import load_book
 from .config import AppConfig
-from .glossary import Glossary, GlossaryEntry, extract_glossary_with_llm
+from .glossary import Glossary, GlossaryEntry, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .translator import TranslationCancelled, Translator, collect_sample_text
 
@@ -181,6 +181,7 @@ class App(ctk.CTk):
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(header, text="专有名词词表", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(header, text="提取词表", width=90, command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(header, text="提取更多词表", width=110, command=self._extract_more_glossary_async).grid(row=0, column=4, padx=4)
         ctk.CTkButton(header, text="保存词表", width=90, command=self._save_glossary).grid(row=0, column=2, padx=4)
         ctk.CTkButton(header, text="加载词表", width=90, command=self._load_glossary).grid(row=0, column=3, padx=4)
 
@@ -226,8 +227,9 @@ class App(ctk.CTk):
         ctk.CTkButton(actions, text="删除", width=70, command=self._remove_selected).grid(row=0, column=2, padx=4)
         ctk.CTkButton(actions, text="确认选中", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
         ctk.CTkButton(actions, text="全部确认", width=90, command=self._confirm_all).grid(row=0, column=4, padx=4)
+        ctk.CTkButton(actions, text="清理重复", width=90, command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
-        self.count_label.grid(row=0, column=5, padx=12, sticky="e")
+        self.count_label.grid(row=0, column=6, padx=12, sticky="e")
 
     def _build_bottom(self, parent):
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -385,8 +387,10 @@ class App(ctk.CTk):
         path = filedialog.askopenfilename(title="加载词表", filetypes=[("JSON", "*.json")])
         if path:
             self.glossary = Glossary.load(Path(path))
+            removed = self.glossary.dedupe()
             self._refresh_tree()
-            self.log(f"词表已加载：{path}，共 {len(self.glossary.entries)} 条")
+            detail = f"，清理重复 {removed} 条" if removed else ""
+            self.log(f"词表已加载：{path}，共 {len(self.glossary.entries)} 条{detail}")
 
     def _extract_glossary_async(self):
         input_path = self.input_var.get().strip()
@@ -430,6 +434,80 @@ class App(ctk.CTk):
             messagebox.showwarning("未提取到词条", "没有解析到有效词条，请查看日志中的模型原始返回。", parent=self)
         else:
             messagebox.showinfo("完成", "词表提取完成，请人工确认后再开始翻译。", parent=self)
+
+    # ---------------- 词表（补充提取） ----------------
+    def _extract_more_glossary_async(self):
+        input_path = self.input_var.get().strip()
+        if not input_path:
+            messagebox.showwarning("提示", "请先选择输入文件", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showinfo("提示", "当前没有已加载的词表，请先“提取词表”或“加载词表”", parent=self)
+            return
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("提取更多词表中…")
+        self.log("开始基于现有词表补充提取专有名词")
+        self.worker = threading.Thread(
+            target=self._extract_more_worker,
+            args=(Path(input_path),),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _extract_more_worker(self, input_path: Path):
+        try:
+            config = self._config_from_ui()
+            book = load_book(input_path)
+            sample = collect_sample_text(book, config)
+            self.log(f"已读取样章 {len(sample)} 字，开始请求 LLM 补充词表")
+            llm = LLMClient(config)
+            new_glossary = extract_more_glossary(llm, sample, self.glossary, config.glossary_limit)
+            self.after(0, lambda: self._on_extract_more_done(new_glossary))
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_extract_more_done(self, new_glossary: Glossary):
+        before = {e.ko: e.zh for e in self.glossary.entries}
+        added, skipped = self.glossary.append_unique(new_glossary.valid_entries())
+        diff_zh = sum(
+            1 for e in new_glossary.valid_entries() if e.ko in before and before[e.ko] != e.zh
+        )
+        self._refresh_tree()
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("词表补充完成")
+        self.log(
+            f"补充完成：新增 {added} 条，跳过重复 {skipped} 条，"
+            f"当前共 {len(self.glossary.valid_entries())} 条"
+        )
+        if diff_zh:
+            self.log(f"提示：{diff_zh} 条重复词的译名与现有词表不一致，已保留现有译名")
+        if added:
+            messagebox.showinfo(
+                "完成",
+                f"新增 {added} 条词条，已追加到当前词表末尾。\n跳过重复 {skipped} 条。",
+                parent=self,
+            )
+        else:
+            messagebox.showinfo("提示", f"没有新增词条（跳过重复 {skipped} 条）。", parent=self)
+
+    def _cleanup_duplicates(self):
+        if not self.glossary.entries:
+            messagebox.showinfo("提示", "当前没有词表", parent=self)
+            return
+        removed = self.glossary.dedupe()
+        self._refresh_tree()
+        if removed:
+            self.log(f"已清理重复词条：{removed} 条")
+            messagebox.showinfo("完成", f"已清理 {removed} 条重复词条。", parent=self)
+        else:
+            messagebox.showinfo("提示", "没有发现重复词条。", parent=self)
 
     # ---------------- 翻译 ----------------
     def _start_translation(self):
