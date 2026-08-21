@@ -146,8 +146,8 @@ def _apply_ttk_theme(root):
         background="#161B22",
         foreground="#E6EDF3",
         fieldbackground="#161B22",
-        rowheight=32,
-        font=("Microsoft YaHei UI", 10),
+        rowheight=36,
+        font=("Microsoft YaHei UI", 12),
         borderwidth=0,
     )
     style.map(
@@ -159,7 +159,7 @@ def _apply_ttk_theme(root):
         "Custom.Treeview.Heading",
         background="#21262D",
         foreground="#C9D1D9",
-        font=("Microsoft YaHei UI", 10, "bold"),
+        font=("Microsoft YaHei UI", 12, "bold"),
         relief="flat",
         padding=(8, 6),
     )
