@@ -101,3 +101,91 @@ def collect_sample_text_strided(
         if chars >= config.extract_sample_chars:
             break
     return "\n".join(sample)
+
+
+def sample_chapter_report(book, config, *, min_chapter_len: int = 300) -> dict:
+    """对全书跨度采样做“分章校验”，返回选中章节与前后中覆盖信息。
+
+    返回：
+        total_chapters / valid_chapters / sample_chapters：全书章数、有效章数、抽样章数。
+        selected：每章 {index,title,chars,position,progress} 列表，position 为阅读顺序下标。
+        positions：选中章按阅读顺序排列的下标。
+        first_progress / last_progress：首尾选中章的阅读进度（0.0~1.0）。
+        middle_covered：是否覆盖了中段（25%~75%）章节。
+        spans_whole：是否达到“前/后/中”整体覆盖，或全量抽样。
+        all_chapters：是否等于全量（章节数少时自然全量）。
+    """
+    chapters = book.chapters
+    total = len(chapters)
+    valid = [ch for ch in chapters if _chapter_len(ch) >= min_chapter_len] or list(chapters)
+    selected = select_strided_chapters(
+        chapters,
+        target_count=config.extract_sample_chapters,
+        min_chapter_len=min_chapter_len,
+    )
+
+    pos_by_id = {id(ch): pos for pos, ch in enumerate(chapters)}
+    selected_positions = sorted(pos_by_id[id(ch)] for ch in selected)
+
+    def progress_of(pos: int) -> float:
+        if total <= 1:
+            return 1.0
+        return round(pos / (total - 1), 3)
+
+    selected_info: list[dict] = []
+    for ch in selected:
+        pos = pos_by_id[id(ch)]
+        selected_info.append(
+            {
+                "index": ch.index,
+                "title": ch.title,
+                "chars": _chapter_len(ch),
+                "position": pos,
+                "progress": progress_of(pos),
+            }
+        )
+
+    middle_covered = any(0.25 <= item["progress"] <= 0.75 for item in selected_info)
+    first_progress = progress_of(selected_positions[0]) if selected_positions else None
+    last_progress = progress_of(selected_positions[-1]) if selected_positions else None
+    all_chapters = bool(selected) and len(selected) == total
+    spans_whole = all_chapters or (
+        first_progress is not None
+        and first_progress <= 0.34
+        and last_progress is not None
+        and last_progress >= 0.66
+        and middle_covered
+    )
+
+    return {
+        "total_chapters": total,
+        "valid_chapters": len(valid),
+        "sample_chapters": len(selected),
+        "selected": selected_info,
+        "positions": selected_positions,
+        "first_progress": first_progress,
+        "last_progress": last_progress,
+        "middle_covered": middle_covered,
+        "spans_whole": spans_whole,
+        "all_chapters": all_chapters,
+    }
+
+
+def format_sample_chapters(report: dict) -> str:
+    """把分章校验结果压缩为一行可读日志。"""
+    if not report.get("selected"):
+        return "无有效章节，无法校验"
+    positions = report.get("positions") or []
+    pos_str = ",".join(str(p) for p in positions)
+    first = int((report.get("first_progress") or 0) * 100)
+    last = int((report.get("last_progress") or 0) * 100)
+    if report.get("all_chapters"):
+        status = "全章覆盖"
+    elif report.get("spans_whole"):
+        status = "前中后覆盖达标"
+    else:
+        status = "覆盖不足，建议提高抽样章数"
+    return (
+        f"{report.get('sample_chapters')}/{report.get('valid_chapters')} 章，"
+        f"位置[{pos_str}]，进度 {first}%~{last}%，{status}"
+    )

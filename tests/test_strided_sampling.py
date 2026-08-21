@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from hangul_novel_translator.book import Book, Chapter
 from hangul_novel_translator.sampling import (
     collect_sample_text_strided,
+    format_sample_chapters,
+    sample_chapter_report,
     select_strided_chapters,
 )
 
@@ -72,6 +74,41 @@ class TestStridedSampling(unittest.TestCase):
         sample = collect_sample_text_strided(make_book(chapters), config, min_chapter_len=300)
         self.assertIn("封面", sample)
         self.assertIn("版权", sample)
+
+    def test_sample_chapter_report_spans_whole_book(self):
+        chapters = [
+            make_chapter(i, f"第{i+1}章", f"内容{i}", 150) for i in range(60)
+        ]
+        config = SimpleNamespace(extract_sample_chars=30000, extract_sample_chapters=6)
+        report = sample_chapter_report(make_book(chapters), config, min_chapter_len=300)
+        self.assertEqual(report["total_chapters"], 60)
+        self.assertEqual(report["sample_chapters"], 6)
+        self.assertLessEqual(report["first_progress"], 0.34)
+        self.assertGreaterEqual(report["last_progress"], 0.66)
+        self.assertTrue(report["middle_covered"])
+        self.assertTrue(report["spans_whole"])
+        # 选中章按阅读顺序递增，且位置确实覆盖前中后。
+        self.assertEqual(report["positions"], sorted(report["positions"]))
+        self.assertTrue(any(0.25 <= item["progress"] <= 0.75 for item in report["selected"]))
+
+    def test_sample_chapter_report_short_book_all(self):
+        chapters = [make_chapter(i, f"第{i}章", "正文", 100) for i in range(3)]
+        config = SimpleNamespace(extract_sample_chars=30000, extract_sample_chapters=6)
+        report = sample_chapter_report(make_book(chapters), config, min_chapter_len=300)
+        self.assertTrue(report["all_chapters"])
+        self.assertEqual(report["sample_chapters"], 3)
+        self.assertTrue(report["spans_whole"])
+
+    def test_format_sample_chapters_readable(self):
+        chapters = [
+            make_chapter(i, f"第{i+1}章", f"内容{i}", 150) for i in range(30)
+        ]
+        config = SimpleNamespace(extract_sample_chars=30000, extract_sample_chapters=6)
+        text = format_sample_chapters(
+            sample_chapter_report(make_book(chapters), config, min_chapter_len=300)
+        )
+        self.assertIn("章，位置[", text)
+        self.assertIn("前中后覆盖达标", text)
 
 
 if __name__ == "__main__":

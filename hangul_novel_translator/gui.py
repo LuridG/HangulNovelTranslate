@@ -25,7 +25,14 @@ from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
-from .translator import TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided
+from .translator import (
+    TranslationCancelled,
+    TranslationResult,
+    Translator,
+    collect_sample_text_strided,
+    format_sample_chapters,
+    sample_chapter_report,
+)
 
 
 # 配置固定在项目根目录，避免因启动目录不同导致读不到/写错位置。
@@ -1344,7 +1351,11 @@ class App(ctk.CTk):
                 try:
                     book = load_book(path)
                     sample = collect_sample_text_strided(book, config)
-                    self.log(f"第 {index + 1} 本 {name}：样章 {len(sample)} 字")
+                    report = sample_chapter_report(book, config)
+                    self.log(
+                        f"第 {index + 1} 本 {name}：样章 {len(sample)} 字；"
+                        f"分章校验：{format_sample_chapters(report)}"
+                    )
                     llm = LLMClient(config)
                     if first_new and index == 0:
                         new_glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
@@ -1822,7 +1833,11 @@ class App(ctk.CTk):
                         llm = LLMClient(config)
                         book = load_book(path)
                         sample = collect_sample_text_strided(book, config)
-                        self.log(f"自动提取词表：{name} 样章 {len(sample)} 字")
+                        report = sample_chapter_report(book, config)
+                        self.log(
+                            f"自动提取词表：{name} 样章 {len(sample)} 字；"
+                            f"分章校验：{format_sample_chapters(report)}"
+                        )
                         if index == 0:
                             glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
                             self.log(f"已新建词表：{len(glossary.valid_entries())} 条")

@@ -26,7 +26,7 @@ from .book import (
 from .config import AppConfig
 from .glossary import Glossary
 from .llm import LLMClient
-from .sampling import collect_sample_text_strided
+from .sampling import collect_sample_text_strided, format_sample_chapters, sample_chapter_report
 from .utils import extract_json, parse_paragraphs_from_payload, split_paragraph_smart
 
 
