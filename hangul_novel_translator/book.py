@@ -652,7 +652,7 @@ def load_book(path: Path) -> Book:
     raise ValueError("目前只支持 .txt 和 .epub 文件")
 
 
-def book_to_txt(book: Book, path: Path, encoding: str = "utf-8") -> None:
+def book_to_txt(book: Book, path: Path, encoding: str = "utf-8", sanitizer: Any = None) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = [book.title, ""]
@@ -660,7 +660,8 @@ def book_to_txt(book: Book, path: Path, encoding: str = "utf-8") -> None:
         lines.append(chapter.display_title)
         lines.append("")
         for para in chapter.paragraphs:
-            lines.append(strip_inline_markers(para))
+            cleaned_para = sanitizer.clean_paragraph(para) if sanitizer else para
+            lines.append(strip_inline_markers(cleaned_para))
             lines.append("")
         lines.append("")
     path.write_text("\n".join(lines), encoding=encoding)
@@ -732,7 +733,7 @@ def _ancestors_close(style: ParagraphStyle | None) -> str:
     return "".join(f"</{a.tag}>" for a in reversed(style.ancestors))
 
 
-def export_epub(book: Book, path: Path, source_title: str | None = None) -> None:
+def export_epub(book: Book, path: Path, source_title: str | None = None, sanitizer: Any = None) -> None:
     try:
         from ebooklib import epub
     except ImportError as exc:
@@ -784,6 +785,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
         prev_style: ParagraphStyle | None = None
         first = True
         for pi, paragraph in enumerate(chapter.paragraphs):
+            cleaned_para = sanitizer.clean_paragraph(paragraph) if sanitizer else paragraph
             style = chapter.styles[pi] if pi < len(chapter.styles) else None
             key = _ancestors_key(style)
             if key != prev_key:
@@ -793,7 +795,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None) -> None
                     body.append(_ancestors_open(style))
                 prev_key = key
                 prev_style = style
-            body.append(_block_to_html(style, paragraph))
+            body.append(_block_to_html(style, cleaned_para))
             first = False
         if not first and prev_style is not None:
             body.append(_ancestors_close(prev_style))

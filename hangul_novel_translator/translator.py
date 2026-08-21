@@ -1,6 +1,8 @@
 # hangul_novel_translator/translator.py
 from __future__ import annotations
 
+from hangul_novel_translator.sanitizer import ExportSanitizer
+
 import hashlib
 import json
 import re

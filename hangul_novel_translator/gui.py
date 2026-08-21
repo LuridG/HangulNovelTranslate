@@ -279,6 +279,7 @@ class App(ctk.CTk):
         _apply_ttk_theme(self)
 
         self.glossary = Glossary()
+        self.sanitizer_config = SanitizerConfig()
         self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()

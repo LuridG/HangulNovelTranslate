@@ -2,6 +2,8 @@
 """多卷修正与合并：读取翻译存档 JSON，按当前词表修正并拼合输出 TXT/EPUB。"""
 from __future__ import annotations
 
+from hangul_novel_translator.sanitizer import ExportSanitizer
+
 import json
 import posixpath
 import re
@@ -334,15 +336,16 @@ def export_merged(
     fix_stats = fix_book(merged, glossary)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    sanitizer = ExportSanitizer(config.sanitizer_config)
     safe_title = re.sub(r'[\\/:*?"<>|]', "_", title.strip() or "合集")
     paths: list[Path] = []
     if output_txt:
         txt_path = output_dir / f"{safe_title}.zh.txt"
-        book_to_txt(merged, txt_path, config.output_encoding)
+        book_to_txt(merged, txt_path, config.output_encoding, sanitizer=sanitizer)
         paths.append(txt_path)
     if output_epub:
         epub_path = output_dir / f"{safe_title}.zh.epub"
-        export_epub(merged, epub_path, source_title=title.strip() or merged.title)
+        export_epub(merged, epub_path, source_title=title.strip() or merged.title, sanitizer=sanitizer)
         paths.append(epub_path)
     return {
         "paths": paths,

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
+from hangul_novel_translator.sanitizer import SanitizerConfig
 
 
 @dataclass
@@ -39,13 +40,24 @@ class AppConfig:
     output_epub: bool = True
     output_encoding: str = "utf-8-sig"
 
+    # 导出文本清洗过滤。
+    sanitizer_config: SanitizerConfig = field(default_factory=SanitizerConfig)
+
     # 进度文件会默认放在输出目录下。
     state_filename: str = ".translation_state.json"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        filtered = {}
+        for k, v in data.items():
+            if k == "sanitizer_config" and isinstance(v, dict):
+                filtered[k] = SanitizerConfig.from_dict(v)
+            elif k in known:
+                filtered[k] = v
+        return cls(**filtered)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["sanitizer_config"] = self.sanitizer_config.to_dict()
+        return d
