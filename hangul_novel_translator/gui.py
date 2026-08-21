@@ -23,6 +23,99 @@ from .merge import book_from_state, export_merged, inspect_state, merge_books, p
 from .translator import TranslationCancelled, TranslationResult, Translator, collect_sample_text
 
 
+_UI_CONFIG_PATH = Path(".gui_config.json")
+
+
+def _load_ui_state() -> dict[str, Any]:
+    try:
+        if _UI_CONFIG_PATH.exists():
+            return json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_ui_state(state: dict[str, Any]) -> None:
+    try:
+        _UI_CONFIG_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+class TreeviewTooltip:
+    """悬停浮窗：当 Treeview 单元格文本较长时，鼠标悬停展示完整内容/路径。"""
+
+    def __init__(self, tree: ttk.Treeview):
+        self.tree = tree
+        self.tip_window: tk.Toplevel | None = None
+        self.last_item: str | None = None
+        self.last_col: str | None = None
+        self.tree.bind("<Motion>", self._on_motion)
+        self.tree.bind("<Leave>", self._on_leave)
+
+    def _on_motion(self, event):
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not item or not column:
+            self._hide()
+            return
+        if item == self.last_item and column == self.last_col and self.tip_window:
+            return
+        self.last_item = item
+        self.last_col = column
+        try:
+            col_idx = int(column.replace("#", "")) - 1
+            values = self.tree.item(item, "values")
+            if not values or col_idx >= len(values):
+                self._hide()
+                return
+            text = str(values[col_idx]).strip()
+        except Exception:
+            self._hide()
+            return
+        if not text:
+            self._hide()
+            return
+        if len(text) > 16 or "\\" in text or "/" in text or "\n" in text:
+            self._show(event.x_root + 15, event.y_root + 15, text)
+        else:
+            self._hide()
+
+    def _show(self, x: int, y: int, text: str):
+        self._hide()
+        self.tip_window = tw = tk.Toplevel(self.tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tw.attributes("-topmost", True)
+        label = tk.Label(
+            tw,
+            text=text,
+            justify=tk.LEFT,
+            background="#2b2b2b",
+            foreground="#f0f0f0",
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("Segoe UI", 10),
+            padx=8,
+            pady=4,
+            wraplength=600,
+        )
+        label.pack(ipadx=1)
+
+    def _hide(self):
+        if self.tip_window:
+            try:
+                self.tip_window.destroy()
+            except Exception:
+                pass
+            self.tip_window = None
+        self.last_item = None
+        self.last_col = None
+
+    def _on_leave(self, _event):
+        self._hide()
+
+
 class GlossaryEditDialog(ctk.CTkToplevel):
     def __init__(self, master, entry: GlossaryEntry | None = None):
         super().__init__(master)
@@ -118,8 +211,17 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("韩语小说批量翻译工具")
-        self.geometry("1180x760")
+        ui_state = _load_ui_state()
+        saved_geom = ui_state.get("geometry")
+        if isinstance(saved_geom, str) and "x" in saved_geom:
+            try:
+                self.geometry(saved_geom)
+            except Exception:
+                self.geometry("1180x760")
+        else:
+            self.geometry("1180x760")
         self.minsize(960, 640)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.glossary = Glossary()
         self.cancel_event = threading.Event()
@@ -172,6 +274,7 @@ class App(ctk.CTk):
         list_frame = ctk.CTkFrame(parent, fg_color="transparent")
         list_frame.grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
         list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(0, weight=1)
         self.input_tree = ttk.Treeview(
             list_frame,
             columns=("order", "file"),
@@ -181,12 +284,15 @@ class App(ctk.CTk):
         )
         self.input_tree.heading("order", text="序")
         self.input_tree.heading("file", text="文件")
-        self.input_tree.column("order", width=40, anchor="center")
-        self.input_tree.column("file", width=330, anchor="w", stretch=True)
-        self.input_tree.grid(row=0, column=0, sticky="ew")
+        self.input_tree.column("order", width=40, minwidth=30, anchor="center")
+        self.input_tree.column("file", width=450, minwidth=280, anchor="w", stretch=False)
+        self.input_tree.grid(row=0, column=0, sticky="nsew")
         input_scroll = ctk.CTkScrollbar(list_frame, command=self.input_tree.yview)
         input_scroll.grid(row=0, column=1, sticky="ns")
-        self.input_tree.configure(yscrollcommand=input_scroll.set)
+        input_xscroll = ctk.CTkScrollbar(list_frame, orientation="horizontal", command=self.input_tree.xview)
+        input_xscroll.grid(row=1, column=0, sticky="ew")
+        self.input_tree.configure(yscrollcommand=input_scroll.set, xscrollcommand=input_xscroll.set)
+        TreeviewTooltip(self.input_tree)
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=row + 2, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
@@ -311,8 +417,11 @@ class App(ctk.CTk):
         self.tree.grid(row=0, column=0, sticky="nsew")
         scroll = ctk.CTkScrollbar(tree_frame, command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scroll.set)
+        tree_xscroll = ctk.CTkScrollbar(tree_frame, orientation="horizontal", command=self.tree.xview)
+        tree_xscroll.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=scroll.set, xscrollcommand=tree_xscroll.set)
         self.tree.bind("<Double-1>", lambda _e: self._edit_selected())
+        TreeviewTooltip(self.tree)
 
         actions = ctk.CTkFrame(parent, fg_color="transparent")
         actions.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
@@ -362,7 +471,10 @@ class App(ctk.CTk):
         self.merge_tree.grid(row=0, column=0, sticky="nsew")
         merge_scroll = ctk.CTkScrollbar(list_frame, command=self.merge_tree.yview)
         merge_scroll.grid(row=0, column=1, sticky="ns")
-        self.merge_tree.configure(yscrollcommand=merge_scroll.set)
+        merge_xscroll = ctk.CTkScrollbar(list_frame, orientation="horizontal", command=self.merge_tree.xview)
+        merge_xscroll.grid(row=1, column=0, sticky="ew")
+        self.merge_tree.configure(yscrollcommand=merge_scroll.set, xscrollcommand=merge_xscroll.set)
+        TreeviewTooltip(self.merge_tree)
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
@@ -1292,6 +1404,20 @@ class App(ctk.CTk):
         self.status_var.set("出错")
         self.log(f"错误：{message}")
         messagebox.showerror("错误", message, parent=self)
+
+    def _on_close(self):
+        try:
+            state = _load_ui_state()
+            state["geometry"] = self.winfo_geometry()
+            _save_ui_state(state)
+        except Exception:
+            pass
+        if self.worker and self.worker.is_alive():
+            if messagebox.askyesno("退出确认", "当前正在执行翻译任务，确定要强制退出吗？", parent=self):
+                self.cancel_event.set()
+                self.destroy()
+        else:
+            self.destroy()
 
     def _stop(self):
         if self.worker and self.worker.is_alive():
