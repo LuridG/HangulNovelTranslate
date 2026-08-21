@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import queue
+import re
+import shutil
 import threading
 import time
 import tkinter as tk
@@ -19,13 +21,15 @@ from typing import Any
 from .sanitizer import CustomRule, ExportSanitizer, SanitizerConfig
 from .book import load_book
 from .config import AppConfig
+from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMClient
 from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
-from .translator import TranslationCancelled, TranslationResult, Translator, collect_sample_text
+from .translator import TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided
 
 
-_UI_CONFIG_PATH = Path(".gui_config.json")
+# 配置固定在项目根目录，避免因启动目录不同导致读不到/写错位置。
+_UI_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".gui_config.json"
 
 
 def _load_ui_state() -> dict[str, Any]:
@@ -260,6 +264,237 @@ class GlossaryEditDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class SanitizerRuleDialog(ctk.CTkToplevel):
+    """导出清洗器规则配置弹窗：内置规则开关 + 自定义正则/文本替换规则 + 实时预览。"""
+
+    def __init__(self, master, config: SanitizerConfig, on_apply):
+        super().__init__(master)
+        self.title("自定义清洗规则")
+        self.geometry("800x620")
+        self.minsize(720, 520)
+        self.config = config
+        self.on_apply = on_apply
+        self.transient(master)
+        self.grab_set()
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            self, text="内置规则", font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=0, padx=12, pady=(14, 4), sticky="w")
+        self.strip_numbers_var = tk.BooleanVar(value=config.strip_numbers)
+        self.strip_json_var = tk.BooleanVar(value=config.strip_json_residue)
+        self.fix_quotes_var = tk.BooleanVar(value=config.fix_quotes)
+        self.polish_punct_var = tk.BooleanVar(value=config.polish_punctuation)
+        builtin = ctk.CTkFrame(self, fg_color="transparent")
+        builtin.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        ctk.CTkCheckBox(
+            builtin, text="自动清除段首段落编号 [1] / 1. 等", variable=self.strip_numbers_var
+        ).grid(row=0, column=0, padx=(0, 18), sticky="w")
+        ctk.CTkCheckBox(
+            builtin, text='自动清除 JSON 结构残渣 {"paragraphs": 等', variable=self.strip_json_var
+        ).grid(row=1, column=0, padx=(0, 18), sticky="w")
+        ctk.CTkCheckBox(
+            builtin, text='自动修正外层未剥离半角引号 "', variable=self.fix_quotes_var
+        ).grid(row=2, column=0, padx=(0, 18), sticky="w")
+        ctk.CTkCheckBox(
+            builtin, text="标点美化（... → ……、重复感叹/问号收敛）", variable=self.polish_punct_var
+        ).grid(row=3, column=0, padx=(0, 18), sticky="w")
+
+        rules_header = ctk.CTkFrame(self, fg_color="transparent")
+        rules_header.grid(row=2, column=0, padx=12, pady=(6, 4), sticky="ew")
+        rules_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            rules_header, text="自定义规则", font=ctk.CTkFont(size=14, weight="bold")
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            rules_header, text="＋ 添加", width=70, command=self._add_rule
+        ).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(
+            rules_header, text="✎ 编辑", width=70,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._edit_rule,
+        ).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(
+            rules_header, text="✕ 删除", width=70,
+            fg_color=THEME["secondary"], hover_color=THEME["danger"],
+            border_width=1, border_color=THEME["card_border"], command=self._delete_rule,
+        ).grid(row=0, column=3, padx=4)
+
+        tree_frame = ctk.CTkFrame(self)
+        tree_frame.grid(row=3, column=0, padx=12, pady=(0, 6), sticky="nsew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        self.rules_tree = ttk.Treeview(
+            tree_frame,
+            columns=("type", "pattern", "replace", "enabled"),
+            show="headings",
+            height=8,
+            style="Custom.Treeview",
+        )
+        self.rules_tree.heading("type", text="类型")
+        self.rules_tree.heading("pattern", text="查找内容")
+        self.rules_tree.heading("replace", text="替换为")
+        self.rules_tree.heading("enabled", text="启用")
+        self.rules_tree.column("type", width=80, anchor="center")
+        self.rules_tree.column("pattern", width=360, anchor="w")
+        self.rules_tree.column("replace", width=180, anchor="w")
+        self.rules_tree.column("enabled", width=60, anchor="center")
+        self.rules_tree.grid(row=0, column=0, sticky="nsew")
+        rules_scroll = ctk.CTkScrollbar(tree_frame, command=self.rules_tree.yview)
+        rules_scroll.grid(row=0, column=1, sticky="ns")
+        self.rules_tree.configure(yscrollcommand=rules_scroll.set)
+        self.rules_tree.bind("<Double-1>", lambda _e: self._edit_rule())
+        self._refresh_rules()
+
+        preview_frame = ctk.CTkFrame(self, fg_color="transparent")
+        preview_frame.grid(row=4, column=0, padx=12, pady=(0, 6), sticky="ew")
+        preview_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(preview_frame, text="测试文本").grid(row=0, column=0, padx=(4, 8), sticky="w")
+        self.test_text_var = tk.StringVar(value="[1] 这是一个测试段落…")
+        ctk.CTkEntry(preview_frame, textvariable=self.test_text_var).grid(
+            row=0, column=1, padx=4, sticky="ew"
+        )
+        ctk.CTkButton(preview_frame, text="▶ 测试", width=70, command=self._run_test).grid(
+            row=0, column=2, padx=4
+        )
+        self.preview_result_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            preview_frame, textvariable=self.preview_result_var, anchor="w",
+            wraplength=620, justify="left",
+        ).grid(row=1, column=0, columnspan=3, padx=4, pady=(4, 0), sticky="w")
+        self._run_test()
+
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="e")
+        ctk.CTkButton(bottom, text="取消", width=90, command=self.destroy).grid(row=0, column=0, padx=6)
+        ctk.CTkButton(
+            bottom, text="确定", width=90,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._ok,
+        ).grid(row=0, column=1, padx=6)
+
+    def _refresh_rules(self):
+        for item in self.rules_tree.get_children():
+            self.rules_tree.delete(item)
+        for i, rule in enumerate(self.config.custom_rules):
+            self.rules_tree.insert(
+                "",
+                "end",
+                iid=str(i),
+                values=(
+                    "正则" if rule.is_regex else "文本",
+                    rule.pattern,
+                    rule.replace,
+                    "✓" if rule.enabled else "",
+                ),
+            )
+
+    def _selected_index(self) -> int | None:
+        sel = self.rules_tree.selection()
+        if not sel:
+            return None
+        return int(sel[0])
+
+    def _add_rule(self):
+        self._edit_rule(index=None)
+
+    def _edit_rule(self, index: int | None = None):
+        if index is None:
+            index = self._selected_index()
+        rule = self.config.custom_rules[index] if index is not None else CustomRule("")
+        dialog = RuleEditDialog(self, rule)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        if index is None:
+            self.config.custom_rules.append(dialog.result)
+        else:
+            self.config.custom_rules[index] = dialog.result
+        self._refresh_rules()
+        self._run_test()
+
+    def _delete_rule(self):
+        index = self._selected_index()
+        if index is None:
+            return
+        del self.config.custom_rules[index]
+        self._refresh_rules()
+        self._run_test()
+
+    def _run_test(self):
+        from .sanitizer import ExportSanitizer
+
+        # 用当前弹窗的开关即时构建一个临时配置做预览。
+        temp = SanitizerConfig(
+            enabled=True,
+            strip_numbers=self.strip_numbers_var.get(),
+            strip_json_residue=self.strip_json_var.get(),
+            fix_quotes=self.fix_quotes_var.get(),
+            polish_punctuation=self.polish_punct_var.get(),
+            custom_rules=list(self.config.custom_rules),
+        )
+        result = ExportSanitizer(temp).clean_paragraph(self.test_text_var.get())
+        self.preview_result_var.set(f"清洗后：{result}")
+
+    def _ok(self):
+        self.config.strip_numbers = self.strip_numbers_var.get()
+        self.config.strip_json_residue = self.strip_json_var.get()
+        self.config.fix_quotes = self.fix_quotes_var.get()
+        self.config.polish_punctuation = self.polish_punct_var.get()
+        self.on_apply()
+        self.destroy()
+
+
+class RuleEditDialog(ctk.CTkToplevel):
+    """单条自定义规则的编辑弹窗。"""
+
+    def __init__(self, master, rule: CustomRule):
+        super().__init__(master)
+        self.title("编辑规则")
+        self.geometry("520x260")
+        self.transient(master)
+        self.grab_set()
+        self.result: CustomRule | None = None
+
+        self.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(self, text="模式类型").grid(row=0, column=0, padx=12, pady=(16, 4), sticky="w")
+        self.is_regex_var = tk.BooleanVar(value=rule.is_regex)
+        ctk.CTkCheckBox(
+            self, text="使用正则表达式（否则按纯文本替换）", variable=self.is_regex_var
+        ).grid(row=0, column=1, padx=12, pady=(16, 4), sticky="w")
+        ctk.CTkLabel(self, text="查找内容").grid(row=1, column=0, padx=12, pady=4, sticky="w")
+        self.pattern_var = tk.StringVar(value=rule.pattern)
+        ctk.CTkEntry(self, textvariable=self.pattern_var).grid(row=1, column=1, padx=12, pady=4, sticky="ew")
+        ctk.CTkLabel(self, text="替换为（可空）").grid(row=2, column=0, padx=12, pady=4, sticky="w")
+        self.replace_var = tk.StringVar(value=rule.replace)
+        ctk.CTkEntry(self, textvariable=self.replace_var).grid(row=2, column=1, padx=12, pady=4, sticky="ew")
+        self.enabled_var = tk.BooleanVar(value=rule.enabled)
+        ctk.CTkCheckBox(self, text="启用该规则", variable=self.enabled_var).grid(
+            row=3, column=1, padx=12, pady=4, sticky="w"
+        )
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=4, column=0, columnspan=2, padx=12, pady=(10, 12), sticky="e")
+        ctk.CTkButton(bottom, text="取消", width=80, command=self.destroy).grid(row=0, column=0, padx=6)
+        ctk.CTkButton(
+            bottom, text="确定", width=80,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._ok,
+        ).grid(row=0, column=1, padx=6)
+
+    def _ok(self):
+        pattern = self.pattern_var.get().strip()
+        if not pattern:
+            messagebox.showwarning("提示", "查找内容不能为空", parent=self)
+            return
+        self.result = CustomRule(
+            pattern=pattern,
+            replace=self.replace_var.get(),
+            is_regex=self.is_regex_var.get(),
+            enabled=self.enabled_var.get(),
+        )
+        self.destroy()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -268,7 +503,17 @@ class App(ctk.CTk):
 
         self.title("韩语小说批量翻译工具")
         ui_state = _load_ui_state()
+        self._saved_window_state = ui_state.get("window_state")
+        self._geometry_save_after_id: str | None = None
         saved_geom = ui_state.get("geometry")
+        # 兼容旧版：旧代码用 winfo_geometry()（物理像素）保存且没有 window_state 标记。
+        # 用当前窗口缩放因子把物理像素换算回逻辑单位，避免 CTk.geometry() 在 DPI 缩放屏上二次放大。
+        if (
+            isinstance(saved_geom, str)
+            and "x" in saved_geom
+            and "window_state" not in ui_state
+        ):
+            saved_geom = self._legacy_geometry_to_logical(saved_geom)
         if isinstance(saved_geom, str) and "x" in saved_geom:
             try:
                 self.geometry(saved_geom)
@@ -278,15 +523,25 @@ class App(ctk.CTk):
             self.geometry("1180x760")
         self.minsize(960, 640)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 用户拖动/移动窗口时防抖落盘，即使进程被强杀也能保留上次尺寸。
+        self.bind("<Configure>", self._on_window_configure, add="+")
         _apply_ttk_theme(self)
 
         self.glossary = Glossary()
         self.sanitizer_config = SanitizerConfig()
+        saved_sanitizer = ui_state.get("sanitizer_config")
+        if isinstance(saved_sanitizer, dict):
+            try:
+                self.sanitizer_config = SanitizerConfig.from_dict(saved_sanitizer)
+            except Exception:
+                self.sanitizer_config = SanitizerConfig()
         self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
 
         self._build_layout()
+        if self._saved_window_state == "zoomed":
+            self.after(0, self._restore_zoomed_state)
         self.after(120, self._drain_log_queue)
 
     # ---------------- UI ----------------
@@ -312,8 +567,10 @@ class App(ctk.CTk):
         self.tab_glossary.grid_columnconfigure(0, weight=1)
         self.tab_glossary.grid_rowconfigure(1, weight=1)
         self.tab_merge = self.tabs.add("多卷修正")
+        self.tab_fixer = self.tabs.add("成品矫正")
         self._build_right(self.tab_glossary)
         self._build_merge_tab(self.tab_merge)
+        self._build_fixer_tab(self.tab_fixer)
 
         bottom = ctk.CTkFrame(self)
         bottom.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="ew")
@@ -412,6 +669,23 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(parent, text="输出 EPUB", variable=self.epub_var).grid(
             row=row + 4, column=1, padx=12, pady=2, sticky="w"
         )
+
+        self.sanitizer_enabled_var = tk.BooleanVar(value=self.sanitizer_config.enabled)
+        ctk.CTkCheckBox(
+            parent,
+            text="导出时自动清洗翻译残余",
+            variable=self.sanitizer_enabled_var,
+        ).grid(row=row + 5, column=0, columnspan=2, padx=12, pady=(8, 2), sticky="w")
+        ctk.CTkButton(
+            parent,
+            text="⚙ 自定义清洗规则...",
+            width=170,
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            border_width=1,
+            border_color=THEME["card_border"],
+            command=self._open_sanitizer_dialog,
+        ).grid(row=row + 6, column=0, columnspan=2, padx=12, pady=2, sticky="w")
 
     def _build_right(self, parent):
         header = ctk.CTkFrame(parent, fg_color="transparent")
@@ -563,6 +837,60 @@ class App(ctk.CTk):
             anchor="w",
         ).grid(row=5, column=0, padx=12, pady=(0, 12), sticky="w")
 
+    def _build_fixer_tab(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            parent,
+            text="成品 EPUB 词表无损矫正（不破坏封面/CSS/图片/目录）",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, padx=12, pady=(14, 6), sticky="w")
+
+        input_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        input_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        input_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(input_frame, text="成品 EPUB 路径").grid(row=0, column=0, padx=(4, 8), sticky="w")
+        self.fixer_path_var = tk.StringVar(value="")
+        ctk.CTkEntry(input_frame, textvariable=self.fixer_path_var).grid(
+            row=0, column=1, padx=4, sticky="ew"
+        )
+        ctk.CTkButton(
+            input_frame, text="📂 浏览", width=80,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._fixer_browse,
+        ).grid(row=0, column=2, padx=4)
+        self.fixer_glossary_label = ctk.CTkLabel(input_frame, text="")
+        self.fixer_glossary_label.grid(row=0, column=3, padx=12, sticky="e")
+
+        mode_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        mode_frame.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
+        self.fixer_mode_var = tk.StringVar(value="new")
+        ctk.CTkRadioButton(
+            mode_frame, text="另存为新文件 (_fixed.epub)", variable=self.fixer_mode_var, value="new"
+        ).grid(row=0, column=0, padx=4, sticky="w")
+        ctk.CTkRadioButton(
+            mode_frame, text="原地覆盖（自动生成 .bak 备份）", variable=self.fixer_mode_var, value="overwrite"
+        ).grid(row=0, column=1, padx=(18, 4), sticky="w")
+
+        run_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        run_frame.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(run_frame, text="🔍 预检变更", width=110, command=self._fixer_preview_async).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(
+            run_frame, text="⚡ 开始无损矫正", width=140,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._fixer_run_async,
+        ).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(
+            run_frame, text="刷新词表统计", width=110,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._fixer_refresh_glossary,
+        ).grid(row=0, column=2, padx=4)
+
+        self.fixer_preview = ctk.CTkTextbox(parent, height=320)
+        self.fixer_preview.grid(row=4, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self.fixer_preview.configure(state="disabled")
+        self._fixer_refresh_glossary()
+
     def _build_bottom(self, parent):
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
         status_bar.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="ew")
@@ -581,6 +909,128 @@ class App(ctk.CTk):
         self.log_box = ctk.CTkTextbox(parent, height=110)
         self.log_box.grid(row=1, column=0, padx=12, pady=(4, 10), sticky="ew")
         self.log_box.configure(state="disabled")
+
+    # ---------------- 导出清洗器 ----------------
+    def _open_sanitizer_dialog(self):
+        self.sanitizer_enabled_var.set(self.sanitizer_config.enabled)
+        dialog = SanitizerRuleDialog(
+            self, self.sanitizer_config, on_apply=self._after_sanitizer_config
+        )
+        self.wait_window(dialog)
+
+    def _after_sanitizer_config(self):
+        self.sanitizer_config.enabled = self.sanitizer_enabled_var.get()
+        self.log("清洗规则已更新")
+
+    # ---------------- 成品矫正 ----------------
+    def _fixer_browse(self):
+        path = filedialog.askopenfilename(
+            title="选择成品 EPUB",
+            filetypes=[("EPUB", "*.epub")],
+            parent=self,
+        )
+        if path:
+            self.fixer_path_var.set(path)
+
+    def _fixer_refresh_glossary(self):
+        valid = len(self.glossary.valid_entries())
+        confirmed = sum(1 for e in self.glossary.valid_entries() if e.confirmed)
+        self.fixer_glossary_label.configure(
+            text=f"当前词表：{valid} 条有效 / {confirmed} 条已确认"
+        )
+
+    def _fixer_set_busy(self, busy: bool):
+        self.start_btn.configure(state="disabled" if busy else "normal")
+
+    def _fixer_preview_async(self):
+        epub = self.fixer_path_var.get().strip()
+        if not epub:
+            messagebox.showwarning("提示", "请先选择成品 EPUB", parent=self)
+            return
+        if not Path(epub).exists():
+            messagebox.showerror("错误", "EPUB 文件不存在", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showwarning("提示", "当前词表为空，请先加载或提取词表", parent=self)
+            return
+        self._fixer_set_busy(True)
+        self.status_var.set("预检变更…")
+        self.worker = threading.Thread(
+            target=self._fixer_preview_worker, args=(epub,), daemon=True
+        )
+        self.worker.start()
+
+    def _fixer_preview_worker(self, epub):
+        try:
+            result = preview_finished_epub(epub, self.glossary)
+            self.after(0, lambda: self._on_fixer_preview_done(result))
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._on_error(str(exc)))
+
+    def _on_fixer_preview_done(self, result):
+        self._fixer_set_busy(False)
+        self.status_var.set("预检完成")
+        lines = result["lines"]
+        self.fixer_preview.configure(state="normal")
+        self.fixer_preview.delete("1.0", "end")
+        if not lines:
+            self.fixer_preview.insert(
+                "end", "未发现需要修正的译名（当前已确认词条在本书中无命中）。\n"
+            )
+        else:
+            self.fixer_preview.insert(
+                "end",
+                f"共命中 {result['total_hits']} 处，涉及 {len(result['files'])} 个正文文件：\n\n",
+            )
+            for line in lines:
+                self.fixer_preview.insert("end", line + "\n")
+        self.fixer_preview.configure(state="disabled")
+
+    def _fixer_run_async(self):
+        epub = self.fixer_path_var.get().strip()
+        if not epub:
+            messagebox.showwarning("提示", "请先选择成品 EPUB", parent=self)
+            return
+        if not Path(epub).exists():
+            messagebox.showerror("错误", "EPUB 文件不存在", parent=self)
+            return
+        if not self.glossary.valid_entries():
+            messagebox.showwarning("提示", "当前词表为空，请先加载或提取词表", parent=self)
+            return
+        mode = self.fixer_mode_var.get()
+        self._fixer_set_busy(True)
+        self.status_var.set("开始无损矫正…")
+        self.worker = threading.Thread(
+            target=self._fixer_run_worker, args=(epub, mode), daemon=True
+        )
+        self.worker.start()
+
+    def _fixer_run_worker(self, epub, mode):
+        try:
+            src = Path(epub)
+            if mode == "new":
+                output = src.with_name(src.stem + "_fixed.epub")
+            else:
+                backup = src.with_name(src.stem + ".bak.epub")
+                if backup.exists():
+                    backup.unlink()
+                shutil.copy2(src, backup)
+                output = src
+            result = fix_finished_epub_in_place(src, self.glossary, output)
+            self.after(0, lambda: self._on_fixer_run_done(result, output, mode))
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._on_error(str(exc)))
+
+    def _on_fixer_run_done(self, result, output, mode):
+        self._fixer_set_busy(False)
+        self.status_var.set("矫正完成")
+        msg = (
+            f"矫正完成：修改 {result['modified_files']} 个文件，"
+            f"共替换 {result['hit_count']} 处。\n"
+            f"{'已另存为：' if mode == 'new' else '已原地覆盖（已备份 .bak）：'}{output}"
+        )
+        self.log(msg)
+        messagebox.showinfo("完成", msg, parent=self)
 
     # ---------------- 基础操作 ----------------
     def _add_input_files(self):
@@ -669,6 +1119,7 @@ class App(ctk.CTk):
             workers = int(self.workers_var.get())
         except ValueError:
             raise ValueError("每批字符数和并发数必须是整数")
+        self.sanitizer_config.enabled = self.sanitizer_enabled_var.get()
         return AppConfig(
             base_url=self.base_url_var.get().strip(),
             api_key=self.api_key_var.get().strip(),
@@ -678,6 +1129,7 @@ class App(ctk.CTk):
             extract_glossary=self.extract_var.get(),
             output_txt=self.txt_var.get(),
             output_epub=self.epub_var.get(),
+            sanitizer_config=self.sanitizer_config,
         )
 
     # ---------------- 词表 ----------------
@@ -1354,7 +1806,7 @@ class App(ctk.CTk):
                     try:
                         llm = LLMClient(config)
                         book = load_book(path)
-                        sample = collect_sample_text(book, config)
+                        sample = collect_sample_text_strided(book, config)
                         self.log(f"自动提取词表：{name} 样章 {len(sample)} 字")
                         if index == 0:
                             glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)
@@ -1463,10 +1915,51 @@ class App(ctk.CTk):
         self.log(f"错误：{message}")
         messagebox.showerror("错误", message, parent=self)
 
+    # ---------------- 窗口尺寸记忆 ----------------
+    def _legacy_geometry_to_logical(self, geom: str) -> str:
+        """把旧版保存的物理像素几何字符串换算为逻辑单位。"""
+        try:
+            scale = float(self._get_window_scaling() or 1.0)
+        except Exception:
+            scale = 1.0
+        match = re.match(r"^(\d+)x(\d+)([+-]\d+[+-]\d+)?$", geom)
+        if not match:
+            return geom
+        width = round(int(match.group(1)) / scale)
+        height = round(int(match.group(2)) / scale)
+        return f"{width}x{height}{match.group(3) or ''}"
+
+    def _on_window_configure(self, event):
+        # 只处理主窗口自身的变化，忽略子控件触发的大量 Configure。
+        if event.widget is not self:
+            return
+        if self._geometry_save_after_id is not None:
+            self.after_cancel(self._geometry_save_after_id)
+        self._geometry_save_after_id = self.after(600, self._save_window_geometry)
+
+    def _save_window_geometry(self):
+        self._geometry_save_after_id = None
+        try:
+            # 用 CTk 的 getter 拿“逻辑单位”，与 CTk.geometry() 的缩放方向一致，
+            # 避免 winfo_geometry() 的物理像素在 DPI 缩放屏上二次放大。
+            state = _load_ui_state()
+            state["geometry"] = self.geometry()
+            state["window_state"] = self.state()
+            _save_ui_state(state)
+        except Exception:
+            pass
+
+    def _restore_zoomed_state(self):
+        try:
+            self.state("zoomed")
+        except Exception:
+            pass
+
     def _on_close(self):
+        self._save_window_geometry()
         try:
             state = _load_ui_state()
-            state["geometry"] = self.winfo_geometry()
+            state["sanitizer_config"] = self.sanitizer_config.to_dict()
             _save_ui_state(state)
         except Exception:
             pass

@@ -22,11 +22,11 @@ from .book import (
     is_decorative_title,
     load_book,
     metadata_to_dict,
-    strip_inline_markers,
 )
 from .config import AppConfig
 from .glossary import Glossary
 from .llm import LLMClient
+from .sampling import collect_sample_text_strided
 from .utils import extract_json, parse_paragraphs_from_payload, split_paragraph_smart
 
 
@@ -134,20 +134,8 @@ def build_chunks(book: Book, config: AppConfig) -> list[Chunk]:
 
 
 def collect_sample_text(book: Book, config: AppConfig) -> str:
-    """取字数最多的前几章、累计前 N 字用于词表提取，避免采到目录/版权页等短文档。"""
-    sample: list[str] = []
-    chars = 0
-    limit_chapters = min(config.extract_sample_chapters, len(book.chapters))
-    for chapter in sorted(book.chapters, key=len, reverse=True)[:limit_chapters]:
-        for paragraph in chapter.paragraphs:
-            text = strip_inline_markers(paragraph)
-            sample.append(text)
-            chars += len(text)
-            if chars >= config.extract_sample_chars:
-                break
-        if chars >= config.extract_sample_chars:
-            break
-    return "\n".join(sample)
+    """按全书跨度均匀采样样章（向后兼容别名）。"""
+    return collect_sample_text_strided(book, config)
 
 
 def reconcile_paragraphs(translated: list[str], expected_count: int) -> list[str]:
@@ -289,7 +277,7 @@ class Translator:
         self.progress_callback("拆分章节", 0, 1, f"共 {len(book.chapters)} 章，{book.total_chars} 字")
 
         if auto_extract and not glossary.valid_entries():
-            sample = collect_sample_text(book, self.config)
+            sample = collect_sample_text_strided(book, self.config)
             self.progress_callback("提取词表", 0, 1, "正在用 LLM 提取专有名词…")
             glossary = self._extract_glossary(sample)
 
@@ -420,13 +408,24 @@ class Translator:
         translated_book = self._assemble(book, chunks, completed, failed, glossary)
         output_paths: list[Path] = []
         base_stem = f"{output_stem or book.title}.zh"
+        sanitizer = ExportSanitizer(self.config.sanitizer_config)
         if self.config.output_txt:
             txt_path = output_dir / f"{base_stem}.txt"
-            book_to_txt(translated_book, txt_path, self.config.output_encoding)
+            book_to_txt(
+                translated_book,
+                txt_path,
+                self.config.output_encoding,
+                sanitizer=sanitizer,
+            )
             output_paths.append(txt_path)
         if self.config.output_epub:
             epub_path = output_dir / f"{base_stem}.epub"
-            export_epub(translated_book, epub_path, source_title=book.title)
+            export_epub(
+                translated_book,
+                epub_path,
+                source_title=book.title,
+                sanitizer=sanitizer,
+            )
             output_paths.append(epub_path)
 
         return TranslationResult(

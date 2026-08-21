@@ -31,6 +31,18 @@ class TestSanitizer(unittest.TestCase):
         cleaned = self.sanitizer.clean_paragraph(raw)
         self.assertEqual(cleaned, "男人平静地解释着。孩子大概是觉得照片里年幼的男孩竟然是自己的父亲很神奇，一直在仔细端详。")
 
+    def test_polish_punctuation(self):
+        config = SanitizerConfig(polish_punctuation=True)
+        sanitizer = ExportSanitizer(config)
+        self.assertEqual(sanitizer.clean_paragraph("等等...然后呢"), "等等……然后呢")
+        self.assertEqual(sanitizer.clean_paragraph("真的吗???"), "真的吗？")
+        self.assertEqual(sanitizer.clean_paragraph("好！！！"), "好！")
+
+    def test_polish_punctuation_disabled(self):
+        config = SanitizerConfig(polish_punctuation=False)
+        sanitizer = ExportSanitizer(config)
+        self.assertEqual(sanitizer.clean_paragraph("等等...然后呢"), "等等...然后呢")
+
     def test_custom_rules(self):
         config = SanitizerConfig(
             custom_rules=[

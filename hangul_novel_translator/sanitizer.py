@@ -32,6 +32,8 @@ class SanitizerConfig:
     strip_numbers: bool = True
     strip_json_residue: bool = True
     fix_quotes: bool = True
+    # 标点排版美化：韩式省略号 ... -> ……、重复感叹/问号收敛为单全角。
+    polish_punctuation: bool = True
     custom_rules: list[CustomRule] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,6 +42,7 @@ class SanitizerConfig:
             "strip_numbers": self.strip_numbers,
             "strip_json_residue": self.strip_json_residue,
             "fix_quotes": self.fix_quotes,
+            "polish_punctuation": self.polish_punctuation,
             "custom_rules": [r.to_dict() for r in self.custom_rules],
         }
 
@@ -53,6 +56,7 @@ class SanitizerConfig:
             strip_numbers=bool(data.get("strip_numbers", True)),
             strip_json_residue=bool(data.get("strip_json_residue", True)),
             fix_quotes=bool(data.get("fix_quotes", True)),
+            polish_punctuation=bool(data.get("polish_punctuation", True)),
             custom_rules=rules,
         )
 
@@ -111,7 +115,13 @@ class ExportSanitizer:
                 ):
                     text = text[1:-1]
 
-        # 5. Apply custom rules
+        # 5. 标点排版美化：韩式省略号 -> 中文省略号；重复感叹/问号收敛为单全角。
+        if self.config.polish_punctuation:
+            text = re.sub(r"\.{3,}", "……", text)
+            text = re.sub(r"[!！]{2,}", "！", text)
+            text = re.sub(r"[?？]{2,}", "？", text)
+
+        # 6. Apply custom rules
         for rule in self.config.custom_rules:
             if not rule.enabled or not rule.pattern:
                 continue
