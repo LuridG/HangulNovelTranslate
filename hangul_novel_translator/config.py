@@ -30,6 +30,11 @@ class AppConfig:
     extract_glossary: bool = True
     extract_sample_chars: int = 30000
     extract_sample_chapters: int = 6
+    # 全书跨度采样走向：前/中/后 3 个区域，每个区域抽 2 章；预算随书长放大。
+    extract_sample_regions: int = 3
+    extract_sample_per_region: int = 2
+    extract_sample_chars_per_100k: int = 20000
+    extract_sample_chars_cap: int = 60000
     glossary_limit: int = 120
 
     # 断点续传。

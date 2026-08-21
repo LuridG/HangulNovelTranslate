@@ -6,6 +6,7 @@ from hangul_novel_translator.sampling import (
     collect_sample_text_strided,
     format_sample_chapters,
     sample_chapter_report,
+    select_region_chapters,
     select_strided_chapters,
 )
 
@@ -107,8 +108,56 @@ class TestStridedSampling(unittest.TestCase):
         text = format_sample_chapters(
             sample_chapter_report(make_book(chapters), config, min_chapter_len=300)
         )
-        self.assertIn("章，位置[", text)
+        self.assertIn("章，样本", text)
+        self.assertIn("位置[", text)
         self.assertIn("前中后覆盖达标", text)
+
+    def test_select_region_chapters_covers_three_regions(self):
+        chapters = [
+            make_chapter(i, f"第{i+1}章", f"内容{i}", 120) for i in range(90)
+        ]
+        selected = select_region_chapters(chapters, regions=3, per_region=2, min_chapter_len=300)
+        self.assertEqual(len(selected), 6)
+        positions = [ch.index for ch in selected]
+        self.assertEqual(positions, sorted(positions))
+        # 前、中、后各有至少一章被选中。
+        self.assertTrue(any(p < 30 for p in positions))
+        self.assertTrue(any(30 <= p < 60 for p in positions))
+        self.assertTrue(any(p >= 60 for p in positions))
+
+    def test_sample_budget_scales_with_length(self):
+        chapters = [
+            make_chapter(i, f"第{i}章", f"内容{i}", 1000) for i in range(60)
+        ]
+        config = SimpleNamespace(
+            extract_sample_chars=30000,
+            extract_sample_chapters=6,
+            extract_sample_regions=3,
+            extract_sample_per_region=2,
+            extract_sample_chars_per_100k=20000,
+            extract_sample_chars_cap=60000,
+        )
+        report = sample_chapter_report(make_book(chapters), config, min_chapter_len=300)
+        # 全书约 23 万字，预算放大并封顶到 60000，且抽样章数随预算增加。
+        self.assertEqual(report["budget_chars"], 60000)
+        self.assertGreater(report["sample_chapters"], 6)
+
+    def test_collect_sample_text_region_budget_grows(self):
+        chapters = [
+            make_chapter(i, f"第{i}章", f"内容{i}", 1000) for i in range(60)
+        ]
+        config = SimpleNamespace(
+            extract_sample_chars=30000,
+            extract_sample_chapters=6,
+            extract_sample_regions=3,
+            extract_sample_per_region=2,
+            extract_sample_chars_per_100k=20000,
+            extract_sample_chars_cap=60000,
+        )
+        sample = collect_sample_text_strided(make_book(chapters), config, min_chapter_len=300)
+        # 12 章 × ~4000 字 ≈ 4.8 万，应显著超过老的 3 万。
+        self.assertGreater(len(sample.replace("\n", "")), 30000)
+        self.assertLessEqual(len(sample.replace("\n", "")), 60000)
 
 
 if __name__ == "__main__":

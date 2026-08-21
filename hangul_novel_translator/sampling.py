@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import math
+
 from .book import strip_inline_markers
 
 
@@ -51,6 +53,88 @@ def select_strided_chapters(
     return [ch for _, ch in selected]
 
 
+def select_region_chapters(
+    chapters: list,
+    *,
+    regions: int = 3,
+    per_region: int = 2,
+    min_chapter_len: int = 300,
+) -> list:
+    """按前/中/后区域各取最长代表章，保证整本书从头到尾都有采样覆盖。
+
+    与 select_strided_chapters 的区别：先按阅读顺序切成 regions 个连续区间，
+    再从每个区间内取 per_region 个最长章节，避免桶边界挤压导致某个区域被漏掉。
+    """
+    valid = [
+        (idx, ch)
+        for idx, ch in enumerate(chapters)
+        if _chapter_len(ch) >= min_chapter_len
+    ]
+    if not valid:
+        valid = list(enumerate(chapters))
+
+    total = len(valid)
+    target = min(regions * per_region, total)
+    if total <= target:
+        return [ch for _, ch in valid]
+
+    region_count = min(regions, total)
+    selected: list[tuple[int, object]] = []
+    for r in range(region_count):
+        start = int(r * total / region_count)
+        end = int((r + 1) * total / region_count) if r < region_count - 1 else total
+        bucket = valid[start:end]
+        count = min(per_region, len(bucket))
+        best = sorted(bucket, key=lambda item: _chapter_len(item[1]), reverse=True)[:count]
+        selected.extend(best)
+
+    selected.sort(key=lambda item: item[0])
+    return [ch for _, ch in selected]
+
+
+def _book_total_chars(book) -> int:
+    return sum(_chapter_len(ch) for ch in book.chapters)
+
+
+def _sample_budget(total_chars: int, config) -> int:
+    """采样字符预算：以 extract_sample_chars 为下限，随全书字数放大并封顶。"""
+    base = int(getattr(config, "extract_sample_chars", 30000))
+    per_100k = int(getattr(config, "extract_sample_chars_per_100k", 0))
+    cap = int(getattr(config, "extract_sample_chars_cap", base))
+    scaled = base + per_100k * (total_chars // 100000)
+    return min(cap, max(base, scaled))
+
+
+def _region_plan(config, budget: int) -> tuple[int, int]:
+    """按预算推算前/中/后区域与每区章节数，让长书抽更多章。"""
+    regions = int(getattr(config, "extract_sample_regions", 3))
+    base_per_region = int(getattr(config, "extract_sample_per_region", 2))
+    base_chapters = int(getattr(config, "extract_sample_chapters", 6))
+    base = int(getattr(config, "extract_sample_chars", 30000))
+    base_per_chapter = max(3000, base // max(1, base_chapters))
+    target_chapters = max(base_chapters, budget // base_per_chapter)
+    per_region = max(base_per_region, math.ceil(target_chapters / max(1, regions)))
+    return regions, per_region
+
+
+def _select_sampled_chapters(chapters: list, config, total_chars: int) -> list:
+    """按配置挑选采样章节：优先区域采样，否则退化为跨度分桶。"""
+    regions = getattr(config, "extract_sample_regions", None)
+    per_region = getattr(config, "extract_sample_per_region", None)
+    if regions is not None and per_region is not None:
+        budget = _sample_budget(total_chars, config)
+        regions, per_region = _region_plan(config, budget)
+        return select_region_chapters(
+            chapters,
+            regions=regions,
+            per_region=per_region,
+        )
+    return select_strided_chapters(
+        chapters,
+        target_count=int(getattr(config, "extract_sample_chapters", 6)),
+    )
+
+
 def collect_sample_text_strided(
     book,
     config,
@@ -67,17 +151,15 @@ def collect_sample_text_strided(
     返回：
         按阅读顺序拼接的样章文本，总长不超过 extract_sample_chars。
     """
-    selected = select_strided_chapters(
-        book.chapters,
-        target_count=config.extract_sample_chapters,
-        min_chapter_len=min_chapter_len,
-    )
+    total_chars = _book_total_chars(book)
+    selected = _select_sampled_chapters(book.chapters, config, total_chars)
     if not selected:
         return ""
 
+    budget = _sample_budget(total_chars, config)
     sample: list[str] = []
     chars = 0
-    per_chapter_quota = max(3000, config.extract_sample_chars // len(selected))
+    per_chapter_quota = max(3000, budget // len(selected))
     for chapter in selected:
         chapter_chars = 0
         for paragraph in chapter.paragraphs:
@@ -87,7 +169,7 @@ def collect_sample_text_strided(
             # 严格不超预算：超过 extract_sample_chars 或单章配额时截断到剩余额度。
             allowed = min(
                 len(text),
-                config.extract_sample_chars - chars,
+                budget - chars,
                 per_chapter_quota - chapter_chars,
             )
             if allowed <= 0:
@@ -96,9 +178,9 @@ def collect_sample_text_strided(
             sample.append(piece)
             chars += len(piece)
             chapter_chars += len(piece)
-            if chars >= config.extract_sample_chars or chapter_chars >= per_chapter_quota:
+            if chars >= budget or chapter_chars >= per_chapter_quota:
                 break
-        if chars >= config.extract_sample_chars:
+        if chars >= budget:
             break
     return "\n".join(sample)
 
@@ -118,11 +200,8 @@ def sample_chapter_report(book, config, *, min_chapter_len: int = 300) -> dict:
     chapters = book.chapters
     total = len(chapters)
     valid = [ch for ch in chapters if _chapter_len(ch) >= min_chapter_len] or list(chapters)
-    selected = select_strided_chapters(
-        chapters,
-        target_count=config.extract_sample_chapters,
-        min_chapter_len=min_chapter_len,
-    )
+    total_chars = _book_total_chars(book)
+    selected = _select_sampled_chapters(chapters, config, total_chars)
 
     pos_by_id = {id(ch): pos for pos, ch in enumerate(chapters)}
     selected_positions = sorted(pos_by_id[id(ch)] for ch in selected)
@@ -161,6 +240,8 @@ def sample_chapter_report(book, config, *, min_chapter_len: int = 300) -> dict:
         "total_chapters": total,
         "valid_chapters": len(valid),
         "sample_chapters": len(selected),
+        "total_chars": total_chars,
+        "budget_chars": _sample_budget(total_chars, config),
         "selected": selected_info,
         "positions": selected_positions,
         "first_progress": first_progress,
@@ -179,6 +260,15 @@ def format_sample_chapters(report: dict) -> str:
     pos_str = ",".join(str(p) for p in positions)
     first = int((report.get("first_progress") or 0) * 100)
     last = int((report.get("last_progress") or 0) * 100)
+    total_chars = report.get("total_chars")
+    budget_chars = report.get("budget_chars")
+    size_str = ""
+    if budget_chars is not None:
+        if total_chars is not None and total_chars >= 10000:
+            actual = min(budget_chars, total_chars)
+            size_str = f"，样本 {actual}/{total_chars} 字"
+        else:
+            size_str = f"，样本 {budget_chars} 字"
     if report.get("all_chapters"):
         status = "全章覆盖"
     elif report.get("spans_whole"):
@@ -186,6 +276,6 @@ def format_sample_chapters(report: dict) -> str:
     else:
         status = "覆盖不足，建议提高抽样章数"
     return (
-        f"{report.get('sample_chapters')}/{report.get('valid_chapters')} 章，"
-        f"位置[{pos_str}]，进度 {first}%~{last}%，{status}"
+        f"{report.get('sample_chapters')}/{report.get('valid_chapters')} 章"
+        f"{size_str}，位置[{pos_str}]，进度 {first}%~{last}%，{status}"
     )
