@@ -116,6 +116,60 @@ class TreeviewTooltip:
         self._hide()
 
 
+# ---------------- Theme & UI Style Configuration ----------------
+THEME = {
+    "bg": "#0D1117",
+    "card": "#161B22",
+    "card_border": "#30363D",
+    "input_bg": "#0D1117",
+    "accent": "#238636",
+    "accent_hover": "#2EA043",
+    "primary": "#1F6FEB",
+    "primary_hover": "#388BFD",
+    "danger": "#DA3633",
+    "danger_hover": "#F85149",
+    "secondary": "#21262D",
+    "secondary_hover": "#30363D",
+    "text_main": "#F0F6FC",
+    "text_muted": "#8B949E",
+}
+
+
+def _apply_ttk_theme(root):
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    style.configure(
+        "Custom.Treeview",
+        background="#161B22",
+        foreground="#E6EDF3",
+        fieldbackground="#161B22",
+        rowheight=32,
+        font=("Microsoft YaHei UI", 10),
+        borderwidth=0,
+    )
+    style.map(
+        "Custom.Treeview",
+        background=[("selected", "#1F6FEB")],
+        foreground=[("selected", "#FFFFFF")],
+    )
+    style.configure(
+        "Custom.Treeview.Heading",
+        background="#21262D",
+        foreground="#C9D1D9",
+        font=("Microsoft YaHei UI", 10, "bold"),
+        relief="flat",
+        padding=(8, 6),
+    )
+    style.map(
+        "Custom.Treeview.Heading",
+        background=[("active", "#30363D")],
+        foreground=[("active", "#58A6FF")],
+    )
+
+
 class GlossaryEditDialog(ctk.CTkToplevel):
     def __init__(self, master, entry: GlossaryEntry | None = None):
         super().__init__(master)
@@ -207,8 +261,8 @@ class GlossaryEditDialog(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("system")
-        ctk.set_default_color_theme("blue")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
 
         self.title("韩语小说批量翻译工具")
         ui_state = _load_ui_state()
@@ -222,6 +276,7 @@ class App(ctk.CTk):
             self.geometry("1180x760")
         self.minsize(960, 640)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        _apply_ttk_theme(self)
 
         self.glossary = Glossary()
         self.cancel_event = threading.Event()
@@ -280,7 +335,7 @@ class App(ctk.CTk):
             columns=("order", "file"),
             show="headings",
             height=7,
-            style="Input.Treeview",
+            style="Custom.Treeview",
         )
         self.input_tree.heading("order", text="序")
         self.input_tree.heading("file", text="文件")
@@ -296,11 +351,11 @@ class App(ctk.CTk):
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=row + 2, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
-        ctk.CTkButton(btns, text="添加 .txt/.epub", width=112, command=self._add_input_files).grid(row=0, column=0, padx=4)
-        ctk.CTkButton(btns, text="上移", width=56, command=lambda: self._move_input_file(-1)).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(btns, text="下移", width=56, command=lambda: self._move_input_file(1)).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(btns, text="移除", width=56, command=self._remove_input_files).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(btns, text="清空", width=56, command=self._clear_input_files).grid(row=0, column=4, padx=4)
+        ctk.CTkButton(btns, text="＋ 添加文件", width=105, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._add_input_files).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(btns, text="↑ 上移", width=56, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=lambda: self._move_input_file(-1)).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(btns, text="↓ 下移", width=56, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=lambda: self._move_input_file(1)).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(btns, text="✕ 移除", width=56, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._remove_input_files).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(btns, text="🗑 清空", width=56, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._clear_input_files).grid(row=0, column=4, padx=4)
 
         row += 3
         ctk.CTkLabel(parent, text="小说名（可空，留空则按源文件名命名）", anchor="w").grid(
@@ -315,7 +370,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(parent, text="输出目录", anchor="w").grid(row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w")
         self.output_var = tk.StringVar(value=str(Path.cwd() / "output"))
         ctk.CTkEntry(parent, textvariable=self.output_var).grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
-        ctk.CTkButton(parent, text="选择输出目录", width=160, command=self._choose_output).grid(
+        ctk.CTkButton(parent, text="📁 选择输出目录", width=140, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._choose_output).grid(
             row=row + 2, column=0, columnspan=2, padx=12, pady=4, sticky="w"
         )
 
@@ -360,15 +415,15 @@ class App(ctk.CTk):
         header.grid(row=0, column=0, padx=12, pady=(14, 6), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(header, text="专有名词词表", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(header, text="提取词表", width=90, command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(header, text="⚡ 提取词表", width=96, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(header, text="提取更多词表", width=110, command=self._extract_more_glossary_async).grid(row=0, column=4, padx=4)
         ctk.CTkButton(header, text="完善信息", width=90, command=self._enrich_glossary_async).grid(row=0, column=5, padx=4)
         self.enrich_alts_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(header, text="补可能译法", variable=self.enrich_alts_var).grid(row=0, column=6, padx=(6, 0))
         self.enrich_nick_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(header, text="检测昵称", variable=self.enrich_nick_var).grid(row=0, column=7, padx=(0, 4))
-        ctk.CTkButton(header, text="保存词表", width=90, command=self._save_glossary).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(header, text="加载词表", width=90, command=self._load_glossary).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(header, text="💾 保存词表", width=92, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._save_glossary).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(header, text="📂 加载词表", width=92, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._load_glossary).grid(row=0, column=3, padx=4)
 
         tree_frame = ctk.CTkFrame(parent)
         tree_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
@@ -388,7 +443,7 @@ class App(ctk.CTk):
             show="headings",
             height=18,
             selectmode="extended",
-            style="Glossary.Treeview",
+            style="Custom.Treeview",
         )
         self.headings = {
             "ko": "韩文原文",
@@ -426,12 +481,12 @@ class App(ctk.CTk):
         actions = ctk.CTkFrame(parent, fg_color="transparent")
         actions.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
         ctk.CTkButton(actions, text="新增", width=70, command=self._add_entry).grid(row=0, column=0, padx=4)
-        ctk.CTkButton(actions, text="编辑", width=70, command=self._edit_selected).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(actions, text="删除", width=70, command=self._remove_selected).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(actions, text="确认选中", width=90, command=self._confirm_selected).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(actions, text="全部确认", width=90, command=self._confirm_all).grid(row=0, column=4, padx=4)
-        ctk.CTkButton(actions, text="清理重复", width=90, command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
-        ctk.CTkButton(actions, text="清空词表", width=90, command=self._clear_glossary).grid(row=0, column=6, padx=4)
+        ctk.CTkButton(actions, text="✎ 编辑", width=76, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._edit_selected).grid(row=0, column=1, padx=4)
+        ctk.CTkButton(actions, text="✕ 删除", width=76, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._remove_selected).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(actions, text="✓ 确认选中", width=96, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._confirm_selected).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(actions, text="✓✓ 全部确认", width=100, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._confirm_all).grid(row=0, column=4, padx=4)
+        ctk.CTkButton(actions, text="🧹 清理重复", width=96, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
+        ctk.CTkButton(actions, text="🗑 清空词表", width=96, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._clear_glossary).grid(row=0, column=6, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
         self.count_label.grid(row=0, column=7, padx=12, sticky="e")
 
@@ -460,7 +515,7 @@ class App(ctk.CTk):
             columns=("order", "file", "info"),
             show="headings",
             height=10,
-            style="Glossary.Treeview",
+            style="Custom.Treeview",
         )
         self.merge_tree.heading("order", text="顺序")
         self.merge_tree.heading("file", text="存档文件")
@@ -478,7 +533,7 @@ class App(ctk.CTk):
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="ew")
-        ctk.CTkButton(btns, text="添加存档", width=90, command=self._add_merge_file).grid(row=0, column=0, padx=4)
+        ctk.CTkButton(btns, text="＋ 添加存档", width=100, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._add_merge_file).grid(row=0, column=0, padx=4)
         ctk.CTkButton(btns, text="上移", width=70, command=lambda: self._move_merge_file(-1)).grid(row=0, column=1, padx=4)
         ctk.CTkButton(btns, text="下移", width=70, command=lambda: self._move_merge_file(1)).grid(row=0, column=2, padx=4)
         ctk.CTkButton(btns, text="移除", width=70, command=self._remove_merge_files).grid(row=0, column=3, padx=4)
@@ -495,7 +550,7 @@ class App(ctk.CTk):
         run_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
         ctk.CTkButton(run_frame, text="预览修正", width=110, command=self._merge_preview_async).grid(row=0, column=0, padx=4)
         ctk.CTkButton(run_frame, text="修正并输出", width=130, command=self._merge_run_async).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(run_frame, text="校验并重试", width=110, command=self._merge_retry_async).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(run_frame, text="🔄 校验并重试", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_retry_async).grid(row=0, column=2, padx=4)
 
         ctk.CTkLabel(
             parent,
@@ -514,9 +569,9 @@ class App(ctk.CTk):
         self.progress.grid(row=0, column=0, padx=(0, 12))
         self.status_var = tk.StringVar(value="就绪")
         ctk.CTkLabel(status_bar, textvariable=self.status_var, anchor="w").grid(row=0, column=1, sticky="ew")
-        self.start_btn = ctk.CTkButton(status_bar, text="开始翻译", width=110, command=self._start_translation)
+        self.start_btn = ctk.CTkButton(status_bar, text="▶ 开始翻译", width=120, height=34, font=ctk.CTkFont(size=13, weight="bold"), fg_color=THEME["accent"], hover_color=THEME["accent_hover"], command=self._start_translation)
         self.start_btn.grid(row=0, column=2, padx=6)
-        self.stop_btn = ctk.CTkButton(status_bar, text="停止", width=70, fg_color="#9b3d3d", hover_color="#7a2f2f", command=self._stop)
+        self.stop_btn = ctk.CTkButton(status_bar, text="⏹ 停止", width=80, height=34, font=ctk.CTkFont(size=13, weight="bold"), fg_color=THEME["danger"], hover_color=THEME["danger_hover"], command=self._stop)
         self.stop_btn.grid(row=0, column=3, padx=6)
         self.stop_btn.configure(state="disabled")
 
