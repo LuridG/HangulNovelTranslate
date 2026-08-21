@@ -598,6 +598,8 @@ class Translator:
                     styles,
                     title_zh=chapter.title_zh,
                     heading_level=chapter.heading_level,
+                    parent_index=chapter.parent_index,
+                    is_section=chapter.is_section,
                 )
             )
 

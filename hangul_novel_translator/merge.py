@@ -112,6 +112,8 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
                 styles,
                 title_zh=chapter.title_zh,
                 heading_level=chapter.heading_level,
+                parent_index=chapter.parent_index,
+                is_section=chapter.is_section,
             )
         )
     saved_titles = data.get("chapter_titles") or {}
@@ -254,7 +256,20 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
     )
     chapter_css: dict[str, list[str]] = {}
     for index, book in enumerate(books, start=1):
-        chapters.append(Chapter(len(chapters), f"{prefix}第{index}卷", []))
+        volume_node_index = len(chapters)
+        chapters.append(
+            Chapter(
+                volume_node_index,
+                f"{prefix}第{index}卷",
+                [],
+                heading_level=1,
+                is_section=True,
+            )
+        )
+        old_to_new = {
+            chapter.index: volume_node_index + 1 + i
+            for i, chapter in enumerate(book.chapters)
+        }
         per_volume_css = (
             volume_css_list[index - 1] if index - 1 < len(volume_css_list) else []
         )
@@ -270,6 +285,12 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
                 if per_volume_images
                 else list(chapter.paragraphs)
             )
+            new_level = min(chapter.heading_level + 1, 6)
+            source_parent = chapter.parent_index
+            if source_parent is not None and source_parent in old_to_new:
+                new_parent = old_to_new[source_parent]
+            else:
+                new_parent = volume_node_index
             chapters.append(
                 Chapter(
                     len(chapters),
@@ -278,7 +299,9 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
                     new_sid,
                     list(chapter.styles),
                     title_zh=chapter.title_zh,
-                    heading_level=2,
+                    heading_level=new_level,
+                    parent_index=new_parent,
+                    is_section=chapter.is_section,
                 )
             )
     titles = [b.title for b in books if b.title]

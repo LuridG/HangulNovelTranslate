@@ -37,6 +37,8 @@ class Chapter:
     styles: list[ParagraphStyle | None] = field(default_factory=list)
     title_zh: str = ""
     heading_level: int = 1
+    parent_index: int | None = None
+    is_section: bool = False
 
     @property
     def display_title(self) -> str:
@@ -153,19 +155,6 @@ def parse_txt(path: Path) -> Book:
     return Book(title=path.stem, chapters=chapters, source_path=path)
 
 
-def _flatten_toc(toc, prefix: str = "") -> list[tuple[str, str]]:
-    """返回扁平化的 (href, title)。"""
-    result: list[tuple[str, str]] = []
-    if not toc:
-        return result
-    for item in toc:
-        if isinstance(item, (tuple, list)):
-            result.extend(_flatten_toc(item, prefix))
-        elif hasattr(item, "href") and hasattr(item, "title"):
-            result.append((str(item.href), str(item.title)))
-    return result
-
-
 def _href_basename(href: str) -> str:
     try:
         parsed = urlparse(href)
@@ -173,6 +162,85 @@ def _href_basename(href: str) -> str:
         return Path(path).name
     except Exception:
         return href
+
+
+def _toc_href(entry) -> str:
+    """取目录项的正文页文件名（无对应页返回空串）。"""
+    href = getattr(entry, "href", None) or getattr(entry, "file_name", None)
+    if not href:
+        return ""
+    return _href_basename(href)
+
+
+def _toc_title(entry) -> str:
+    return _strip_invisible_chars(str(getattr(entry, "title", "")))
+
+
+def _collect_toc_hierarchy(toc, depth: int = 0, parent_href: str | None = None,
+                           out: dict | None = None) -> dict[str, dict]:
+    """递归遍历 book.toc，保留目录层级供还原树状 TOC。
+
+    返回 {basename: {"depth", "parent_href", "is_section", "title"}}。
+    纯容器节（无对应正文页的 Section）不生成章节，其子级提升到当前深度，
+    避免产生悬空父级；无 href 的空链接直接忽略。
+    """
+    if out is None:
+        out = {}
+    if not toc:
+        return out
+    for item in toc:
+        if isinstance(item, (tuple, list)):
+            if not item:
+                continue
+            entry = item[0]
+            kids = item[1] if len(item) > 1 else ()
+            is_section = True
+        elif hasattr(item, "href") and hasattr(item, "title"):
+            entry = item
+            kids = ()
+            is_section = False
+        else:
+            continue
+        href = _toc_href(entry)
+        if not href:
+            # 纯容器或无页链接：不新增章节，子级继承父级层级。
+            _collect_toc_hierarchy(kids, depth, parent_href, out)
+            continue
+        out[href] = {
+            "depth": depth,
+            "parent_href": parent_href,
+            "is_section": is_section,
+            "title": _toc_title(entry),
+        }
+        _collect_toc_hierarchy(kids, depth + 1, href, out)
+    return out
+
+
+def _build_toc_tree(chapters: list[Chapter]) -> tuple:
+    """把 Chapter.parent_index 关系还原为 index 级嵌套树。
+
+    返回结构：叶子为 int（chapters 内的下标），分组为 (父下标, (子节点...))。
+    若章节间不存在任何 parent_index 关系，退化为一层平铺；遇到环则断链为叶子。
+    """
+    index_to_pos = {ch.index: pos for pos, ch in enumerate(chapters)}
+    children: dict[int, list[int]] = {}
+    roots: list[int] = []
+    for pos, ch in enumerate(chapters):
+        parent = ch.parent_index
+        if parent is not None and parent in index_to_pos:
+            children.setdefault(index_to_pos[parent], []).append(pos)
+        else:
+            roots.append(pos)
+
+    def build(pos: int, visiting: set[int]) -> int | tuple:
+        if pos in visiting:
+            return pos
+        kids = children.get(pos, [])
+        if kids:
+            return (pos, tuple(build(k, visiting | {pos}) for k in kids))
+        return pos
+
+    return tuple(build(pos, set()) for pos in roots)
 
 
 _SKIP_PAGE_MARKERS = ("목차", "판권", "copyright")
@@ -544,12 +612,12 @@ def parse_epub(path: Path) -> Book:
     title_values = book.get_metadata("DC", "title")
     title = str(title_values[0][0]) if title_values else path.stem
 
-    toc_titles = {
-        _href_basename(href): _strip_invisible_chars(t) for href, t in _flatten_toc(book.toc)
-    }
+    toc_map = _collect_toc_hierarchy(book.toc)
     items = {item.get_id(): item for item in book.get_items_of_type(ITEM_DOCUMENT)}
 
     chapters: list[Chapter] = []
+    index_by_basename: dict[str, int] = {}
+    parent_refs: dict[int, str] = {}
     spine_ids = [ref for ref in getattr(book, "spine", [])]
     if not spine_ids:
         spine_ids = list(items.keys())
@@ -578,7 +646,12 @@ def parse_epub(path: Path) -> Book:
         basename = _href_basename(item.get_name())
         heading = soup.find(["h1", "h2", "h3"])
         heading_title = _normalize_title(heading.get_text(" ", strip=True)) if heading else ""
-        toc_title = toc_titles.get(basename) or ""
+        toc_info = toc_map.get(basename)
+        toc_title = toc_info["title"] if toc_info else ""
+        body_heading_level = int(heading.name[1]) if heading and heading.name in ("h1", "h2", "h3") else 1
+        heading_level = min((toc_info["depth"] + 1) if toc_info else body_heading_level, 6)
+        parent_href = toc_info["parent_href"] if toc_info else None
+        is_section = bool(toc_info and toc_info.get("is_section"))
         if toc_title and not _is_weak_title(toc_title):
             chapter_title = toc_title
         elif heading_title:
@@ -627,8 +700,24 @@ def parse_epub(path: Path) -> Book:
             chapter_title = Path(item.get_name()).stem.replace("_", " ").strip() or "未命名"
 
         chapters.append(
-            Chapter(index, chapter_title, paragraphs, source_id=item_id, styles=styles)
+            Chapter(
+                index,
+                chapter_title,
+                paragraphs,
+                source_id=item_id,
+                styles=styles,
+                heading_level=heading_level,
+                is_section=is_section,
+            )
         )
+        index_by_basename[basename] = index
+        if parent_href:
+            parent_refs[index] = parent_href
+
+    for chapter in chapters:
+        parent_basename = parent_refs.get(chapter.index)
+        if parent_basename:
+            chapter.parent_index = index_by_basename.get(parent_basename)
 
     result = Book(title=title, chapters=chapters, source_path=path)
     if doc_inline_css:
@@ -827,9 +916,20 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                 )
             )
 
-    out.toc = tuple(
-        epub.Link(item.file_name, item.title, item.file_name) for item in chapter_items
-    )
+    def toc_node(node: int | tuple):
+        """把 index 级树转换为 ebooklib 的嵌套 TOC 元组。"""
+        if isinstance(node, tuple):
+            pos, kids = node
+            item = chapter_items[pos]
+            return (
+                epub.Section(item.title, href=item.file_name),
+                tuple(toc_node(k) for k in kids),
+            )
+        item = chapter_items[node]
+        return epub.Link(item.file_name, item.title, item.file_name)
+
+    tree = _build_toc_tree(book.chapters)
+    out.toc = tuple(toc_node(node) for node in tree)
     out.add_item(epub.EpubNcx())
     out.add_item(epub.EpubNav())
     out.spine = ["nav"] + chapter_items

@@ -291,5 +291,33 @@ class ChapterTitleMergeTest(unittest.TestCase):
                 book_from_state(state_path, AppConfig())
 
 
+class MergeHierarchyTest(unittest.TestCase):
+    def test_merge_books_builds_volume_tree(self):
+        b1 = Book(title="卷一", chapters=[Chapter(0, "제1장", ["a"]), Chapter(1, "제2장", ["b"])])
+        b2 = Book(title="卷二", chapters=[Chapter(0, "제3장", ["c"])])
+        merged = merge_books([b1, b2], title="合集")
+        self.assertEqual(
+            [ch.title for ch in merged.chapters],
+            ["合集 第1卷", "제1장", "제2장", "合集 第2卷", "제3장"],
+        )
+        self.assertEqual([ch.heading_level for ch in merged.chapters], [1, 2, 2, 1, 2])
+        self.assertEqual([ch.parent_index for ch in merged.chapters], [None, 0, 0, None, 3])
+        self.assertEqual([ch.is_section for ch in merged.chapters], [True, False, False, True, False])
+
+    def test_merge_books_shifts_nested_levels(self):
+        src = Book(
+            title="源",
+            chapters=[
+                Chapter(0, "第1篇", [], heading_level=1, is_section=True),
+                Chapter(1, "제1장", ["x"], heading_level=2, parent_index=0),
+                Chapter(2, "제2장", ["y"], heading_level=2, parent_index=0),
+            ],
+        )
+        merged = merge_books([src], title="合集")
+        self.assertEqual([ch.heading_level for ch in merged.chapters], [1, 2, 3, 3])
+        self.assertEqual([ch.parent_index for ch in merged.chapters], [None, 0, 1, 1])
+        self.assertEqual([ch.is_section for ch in merged.chapters], [True, True, False, False])
+
+
 if __name__ == "__main__":
     unittest.main()

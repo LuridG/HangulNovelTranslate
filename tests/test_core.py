@@ -77,6 +77,41 @@ class InvisibleCharsTest(unittest.TestCase):
         self.assertEqual(_strip_invisible_chars("\u200b\u200c목차\u200d"), "목차")
 
 
+class TocTreeTest(unittest.TestCase):
+    def test_build_toc_tree_nested(self):
+        from hangul_novel_translator.book import Book, Chapter, _build_toc_tree
+
+        book = Book(
+            title="t",
+            chapters=[
+                Chapter(0, "第1卷", [], is_section=True),
+                Chapter(1, "제1장", ["a"], parent_index=0),
+                Chapter(2, "제2장", ["b"], parent_index=0),
+                Chapter(3, "第2卷", [], is_section=True),
+                Chapter(4, "제3장", ["c"], parent_index=3),
+            ],
+        )
+        self.assertEqual(_build_toc_tree(book.chapters), ((0, (1, 2)), (3, (4,))))
+
+    def test_build_toc_tree_flat_when_no_parents(self):
+        from hangul_novel_translator.book import Book, Chapter, _build_toc_tree
+
+        book = Book(title="t", chapters=[Chapter(0, "a", []), Chapter(1, "b", [])])
+        self.assertEqual(_build_toc_tree(book.chapters), (0, 1))
+
+    def test_build_toc_tree_maps_index_gaps_to_positions(self):
+        from hangul_novel_translator.book import Book, Chapter, _build_toc_tree
+
+        book = Book(
+            title="t",
+            chapters=[
+                Chapter(5, "卷", [], is_section=True),
+                Chapter(7, "章", ["a"], parent_index=5),
+            ],
+        )
+        self.assertEqual(_build_toc_tree(book.chapters), ((0, (1,)),))
+
+
 @unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
 class EpubParsingRegressionTest(unittest.TestCase):
     def test_toc_page_skipped_but_body_word_kept(self):
