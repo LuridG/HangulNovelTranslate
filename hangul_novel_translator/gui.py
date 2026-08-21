@@ -535,6 +535,7 @@ class App(ctk.CTk):
         _apply_ttk_theme(self)
 
         self.glossary = Glossary()
+        self._extract_round = 0
         self.sanitizer_config = SanitizerConfig()
         saved_sanitizer = ui_state.get("sanitizer_config")
         if isinstance(saved_sanitizer, dict):
@@ -1307,8 +1308,11 @@ class App(ctk.CTk):
         self._set_busy(True)
         self.progress.set(0)
         self.status_var.set("提取词表中…")
+        self._extract_round = 0
         self.log(f"开始提取词表：{len(files)} 本书")
-        self.worker = threading.Thread(target=self._extract_worker, args=(files, "new"), daemon=True)
+        self.worker = threading.Thread(
+            target=self._extract_worker, args=(files, "new", 0), daemon=True
+        )
         self.worker.start()
 
     def _extract_more_glossary_async(self):
@@ -1326,13 +1330,21 @@ class App(ctk.CTk):
         self._set_busy(True)
         self.progress.set(0)
         self.status_var.set("提取更多词表中…")
-        self.log(f"开始基于现有词表补充提取：{len(files)} 本书")
-        self.worker = threading.Thread(target=self._extract_worker, args=(files, "more"), daemon=True)
+        self._extract_round += 1
+        self.log(
+            f"开始基于现有词表补充提取（第 {self._extract_round} 轮）：{len(files)} 本书"
+        )
+        self.worker = threading.Thread(
+            target=self._extract_worker,
+            args=(files, "more", self._extract_round),
+            daemon=True,
+        )
         self.worker.start()
 
-    def _extract_worker(self, files: list[Path], mode: str):
+    def _extract_worker(self, files: list[Path], mode: str, sample_round: int = 0):
         """多本依次提取词表：mode=new 且当前词表为空时第一本新建，其余每本走“提取更多”追加；
-        mode=more 时所有书都追加到现有词表。单本失败继续下一本，最后统一汇总。"""
+        mode=more 时所有书都追加到现有词表；sample_round 用于“提取更多”的章节偏移。
+        单本失败继续下一本，最后统一汇总。"""
         try:
             config = self._config_from_ui()
             glossary = self.glossary
@@ -1350,12 +1362,17 @@ class App(ctk.CTk):
                 )
                 try:
                     book = load_book(path)
-                    sample = collect_sample_text_strided(book, config)
-                    report = sample_chapter_report(book, config)
+                    sample = collect_sample_text_strided(book, config, sample_round=sample_round)
+                    report = sample_chapter_report(book, config, sample_round=sample_round)
+                    round_text = f"第{sample_round}轮" if sample_round else ""
                     self.log(
-                        f"第 {index + 1} 本 {name}：样章 {len(sample)} 字；"
+                        f"第 {index + 1} 本 {name}：{round_text}样章 {len(sample)} 字；"
                         f"分章校验：{format_sample_chapters(report)}"
                     )
+                    if not sample:
+                        self.log(f"第 {index + 1} 本 {name}：{round_text}已无可抽样章节，跳过")
+                        stats.append({"path": path, "mode": mode, "added": 0, "skipped": 0})
+                        continue
                     llm = LLMClient(config)
                     if first_new and index == 0:
                         new_glossary = extract_glossary_with_llm(llm, sample, config.glossary_limit)

@@ -159,6 +159,35 @@ class TestStridedSampling(unittest.TestCase):
         self.assertGreater(len(sample.replace("\n", "")), 30000)
         self.assertLessEqual(len(sample.replace("\n", "")), 60000)
 
+    def test_select_region_chapters_round_offset_distinct(self):
+        chapters = [
+            make_chapter(i, f"第{i}章", f"内容{i}", 100) for i in range(90)
+        ]
+        base = select_region_chapters(chapters, regions=3, per_region=2, min_chapter_len=300, skip=0)
+        more = select_region_chapters(chapters, regions=3, per_region=2, min_chapter_len=300, skip=2)
+        base_idx = {ch.index for ch in base}
+        more_idx = {ch.index for ch in more}
+        self.assertTrue(base_idx)
+        self.assertTrue(more_idx)
+        # “提取更多”应抽到不同于“提取词表”的章节。
+        self.assertFalse(base_idx & more_idx)
+
+    def test_collect_sample_text_round_offset_changes(self):
+        chapters = [
+            make_chapter(i, f"第{i}章", f"内容{i}", 200) for i in range(60)
+        ]
+        config = SimpleNamespace(
+            extract_sample_chars=30000,
+            extract_sample_chapters=6,
+            extract_sample_regions=3,
+            extract_sample_per_region=2,
+            extract_sample_chars_per_100k=1000,
+            extract_sample_chars_cap=30000,
+        )
+        s0 = collect_sample_text_strided(make_book(chapters), config, min_chapter_len=300, sample_round=0)
+        s1 = collect_sample_text_strided(make_book(chapters), config, min_chapter_len=300, sample_round=1)
+        self.assertNotEqual(s0, s1)
+
 
 if __name__ == "__main__":
     unittest.main()

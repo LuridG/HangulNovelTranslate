@@ -59,11 +59,14 @@ def select_region_chapters(
     regions: int = 3,
     per_region: int = 2,
     min_chapter_len: int = 300,
+    skip: int = 0,
 ) -> list:
     """按前/中/后区域各取最长代表章，保证整本书从头到尾都有采样覆盖。
 
     与 select_strided_chapters 的区别：先按阅读顺序切成 regions 个连续区间，
     再从每个区间内取 per_region 个最长章节，避免桶边界挤压导致某个区域被漏掉。
+    skip 用于“提取更多”的章节偏移：每轮在区域内按字数降序向后跳过 skip 个，
+    使连续几轮抽到不同章节，而不是重复同一批。
     """
     valid = [
         (idx, ch)
@@ -85,7 +88,8 @@ def select_region_chapters(
         end = int((r + 1) * total / region_count) if r < region_count - 1 else total
         bucket = valid[start:end]
         count = min(per_region, len(bucket))
-        best = sorted(bucket, key=lambda item: _chapter_len(item[1]), reverse=True)[:count]
+        sorted_bucket = sorted(bucket, key=lambda item: _chapter_len(item[1]), reverse=True)
+        best = sorted_bucket[skip : skip + count]
         selected.extend(best)
 
     selected.sort(key=lambda item: item[0])
@@ -117,7 +121,7 @@ def _region_plan(config, budget: int) -> tuple[int, int]:
     return regions, per_region
 
 
-def _select_sampled_chapters(chapters: list, config, total_chars: int) -> list:
+def _select_sampled_chapters(chapters: list, config, total_chars: int, sample_round: int = 0) -> list:
     """按配置挑选采样章节：优先区域采样，否则退化为跨度分桶。"""
     regions = getattr(config, "extract_sample_regions", None)
     per_region = getattr(config, "extract_sample_per_region", None)
@@ -128,6 +132,7 @@ def _select_sampled_chapters(chapters: list, config, total_chars: int) -> list:
             chapters,
             regions=regions,
             per_region=per_region,
+            skip=sample_round * per_region,
         )
     return select_strided_chapters(
         chapters,
@@ -140,6 +145,7 @@ def collect_sample_text_strided(
     config,
     *,
     min_chapter_len: int = 300,
+    sample_round: int = 0,
 ) -> str:
     """按全书跨度均匀采样章节文本，确保多卷合集从头到尾的专有名词都能被捕捉。
 
@@ -152,7 +158,7 @@ def collect_sample_text_strided(
         按阅读顺序拼接的样章文本，总长不超过 extract_sample_chars。
     """
     total_chars = _book_total_chars(book)
-    selected = _select_sampled_chapters(book.chapters, config, total_chars)
+    selected = _select_sampled_chapters(book.chapters, config, total_chars, sample_round)
     if not selected:
         return ""
 
@@ -185,7 +191,7 @@ def collect_sample_text_strided(
     return "\n".join(sample)
 
 
-def sample_chapter_report(book, config, *, min_chapter_len: int = 300) -> dict:
+def sample_chapter_report(book, config, *, min_chapter_len: int = 300, sample_round: int = 0) -> dict:
     """对全书跨度采样做“分章校验”，返回选中章节与前后中覆盖信息。
 
     返回：
@@ -201,7 +207,7 @@ def sample_chapter_report(book, config, *, min_chapter_len: int = 300) -> dict:
     total = len(chapters)
     valid = [ch for ch in chapters if _chapter_len(ch) >= min_chapter_len] or list(chapters)
     total_chars = _book_total_chars(book)
-    selected = _select_sampled_chapters(chapters, config, total_chars)
+    selected = _select_sampled_chapters(chapters, config, total_chars, sample_round)
 
     pos_by_id = {id(ch): pos for pos, ch in enumerate(chapters)}
     selected_positions = sorted(pos_by_id[id(ch)] for ch in selected)
