@@ -822,6 +822,21 @@ class App(ctk.CTk):
         ctk.CTkEntry(cfg_frame, textvariable=self.merge_title_var, width=240).grid(row=0, column=1, padx=4, sticky="w")
         ctk.CTkCheckBox(cfg_frame, text="输出 TXT", variable=self.merge_txt_var).grid(row=0, column=2, padx=(18, 4))
         ctk.CTkCheckBox(cfg_frame, text="输出 EPUB", variable=self.merge_epub_var).grid(row=0, column=3, padx=4)
+        ctk.CTkCheckBox(
+            cfg_frame,
+            text="导出时自动清洗翻译残余",
+            variable=self.sanitizer_enabled_var,
+        ).grid(row=1, column=0, columnspan=2, padx=(4, 8), pady=(10, 0), sticky="w")
+        ctk.CTkButton(
+            cfg_frame,
+            text="⚙ 自定义清洗规则...",
+            width=150,
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            border_width=1,
+            border_color=THEME["card_border"],
+            command=self._open_sanitizer_dialog,
+        ).grid(row=1, column=2, padx=4, pady=(10, 0), sticky="w")
 
         run_frame = ctk.CTkFrame(parent, fg_color="transparent")
         run_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
