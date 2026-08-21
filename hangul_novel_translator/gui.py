@@ -1328,7 +1328,7 @@ class App(ctk.CTk):
                 )
                 try:
                     book = load_book(path)
-                    sample = collect_sample_text(book, config)
+                    sample = collect_sample_text_strided(book, config)
                     self.log(f"第 {index + 1} 本 {name}：样章 {len(sample)} 字")
                     llm = LLMClient(config)
                     if first_new and index == 0:
