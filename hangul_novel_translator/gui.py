@@ -15,6 +15,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError("请先安装 customtkinter：pip install customtkinter") from exc
 
+from typing import Any
+from .sanitizer import CustomRule, ExportSanitizer, SanitizerConfig
 from .book import load_book
 from .config import AppConfig
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
