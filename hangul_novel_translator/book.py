@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import base64
 import html
+import json
+import os
 import posixpath
 import re
+import tempfile
 import unicodedata
 import zlib
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -302,7 +306,7 @@ def _collect_block_style(tag) -> BlockStyle:
     klass = " ".join(tag.get("class") or [])
     style = (tag.get("style") or "").strip()
     attrs: dict = {}
-    for key in ("id", "lang", "align", "title"):
+    for key in ("id", "lang", "align", "title", "role", "epub:type"):
         value = tag.get(key)
         if value:
             attrs[key] = str(value)
@@ -332,8 +336,11 @@ def _ancestor_styles(node) -> list[BlockStyle]:
             "th",
         ):
             style = _collect_block_style(parent)
-            if style.klass or style.style or style.attrs:
-                chain.append(style)
+            # 无属性的语义/布局容器也要保留，否则 CSS 的后代选择器无法匹配。
+            siblings = list(parent.parent.find_all(name, recursive=False)) if getattr(parent, "parent", None) is not None else []
+            if len(siblings) > 1 and parent in siblings:
+                style.attrs["__path"] = siblings.index(parent)
+            chain.append(style)
         parent = getattr(parent, "parent", None)
     chain.reverse()
     return chain
@@ -395,6 +402,70 @@ def _collect_css_resources(book) -> list[dict]:
 
 _MARKER_RE = re.compile("\u27e6(/?)([a-z]+)(?::([^\u27e7]*))?\u27e7")
 _INLINE_STYLE_KEYS = ("color", "background-color", "font-style", "font-weight")
+_INLINE_ATTRS = ("class", "id", "style", "title", "lang", "dir", "href", "role", "epub:type", "color", "face", "size")
+_INLINE_TAGS = {"span", "font", "a", "sup", "sub", "code", "small", "mark", "ruby", "rt"}
+
+
+def _safe_tag_attrs(tag, allowed: tuple[str, ...] = _INLINE_ATTRS) -> dict[str, str | list[str]]:
+    attrs: dict[str, str | list[str]] = {}
+    for key in allowed:
+        value = tag.get(key)
+        if value is None or key.lower().startswith("on"):
+            continue
+        if isinstance(value, list):
+            value = [str(v) for v in value]
+        else:
+            value = str(value)
+        if value:
+            attrs[key] = value
+    return attrs
+
+
+def _attrs_to_html(attrs: dict) -> str:
+    parts: list[str] = []
+    for key, value in attrs.items():
+        if str(key).startswith("__") or str(key).lower().startswith("on"):
+            continue
+        if isinstance(value, list):
+            value = " ".join(str(item) for item in value)
+        parts.append(f' {html.escape(str(key), quote=True)}="{html.escape(str(value), quote=True)}"')
+    return "".join(parts)
+
+
+def _document_attrs(tag) -> dict[str, str | list[str]]:
+    allowed = ("id", "class", "style", "lang", "dir", "title", "role", "xml:lang", "xmlns", "xmlns:epub", "epub:prefix")
+    return _safe_tag_attrs(tag, allowed) if tag is not None else {}
+
+
+def _outer_container_snapshot(body) -> list[dict]:
+    """保存 body 直接外层容器，供存档审计和旧结构兼容使用。"""
+    names = {"div", "section", "article", "aside", "main", "blockquote", "figure", "table", "ul", "ol"}
+    result: list[dict] = []
+    if body is None:
+        return result
+    for child in body.find_all(recursive=False):
+        if child.name in names:
+            result.append({"tag": child.name, "attrs": _safe_tag_attrs(child, _INLINE_ATTRS + ("align",))})
+    return result
+
+
+def _encode_inline_marker(tag_name: str, attrs: dict, inner: str) -> str:
+    payload = json.dumps({"tag": tag_name, "attrs": attrs}, ensure_ascii=False, separators=(",", ":"))
+    encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"\u27e6x:{encoded}\u27e7{inner}\u27e6/x\u27e7"
+
+
+def _decode_inline_marker(value: str) -> tuple[str, dict] | None:
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        data = json.loads(raw.decode("utf-8"))
+        tag = str(data.get("tag", "")).lower()
+        attrs = data.get("attrs") or {}
+        if tag not in _INLINE_TAGS or not isinstance(attrs, dict):
+            return None
+        return tag, attrs
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _inline_style_css(tag) -> str:
@@ -482,9 +553,11 @@ def _inline_markup(node, image_items: dict, base_href: str, images_out: dict) ->
         return "\u27e6br\u27e7"
     if name == "a":
         href = node.get("href") or ""
-        if href.startswith("#") and len(href) > 1:
+        attrs = _safe_tag_attrs(node)
+        if href.startswith("#") and len(href) > 1 and not any(k in attrs for k in ("class", "id", "style", "title")):
             return f"\u27e6fn:{href[1:]}\u27e7"
-        return _inline_markup_children(node, image_items, base_href, images_out)
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        return _encode_inline_marker(name, attrs, inner) if inner else ""
     if name in ("b", "strong"):
         inner = _inline_markup_children(node, image_items, base_href, images_out)
         return f"\u27e6b\u27e7{inner}\u27e6/b\u27e7" if inner else ""
@@ -499,7 +572,14 @@ def _inline_markup(node, image_items: dict, base_href: str, images_out: dict) ->
         inner = _inline_markup_children(node, image_items, base_href, images_out)
         if not inner:
             return ""
-        return f"\u27e6s:{css}\u27e7{inner}\u27e6/s\u27e7" if css else inner
+        attrs = _safe_tag_attrs(node)
+        if name == "span" and css and set(attrs) == {"style"}:
+            return f"\u27e6s:{css}\u27e7{inner}\u27e6/s\u27e7"
+        return _encode_inline_marker(name, attrs, inner) if attrs else inner
+    if name in _INLINE_TAGS:
+        inner = _inline_markup_children(node, image_items, base_href, images_out)
+        attrs = _safe_tag_attrs(node)
+        return _encode_inline_marker(name, attrs, inner) if inner else ""
     return _inline_markup_children(node, image_items, base_href, images_out)
 
 
@@ -518,6 +598,12 @@ def _open_marker_tag(name: str, value: str) -> str:
     if name == "s":
         style_attr = f' style="{html.escape(value, quote=True)}"' if value else ""
         return f"<span{style_attr}>"
+    if name == "x":
+        decoded = _decode_inline_marker(value)
+        if not decoded:
+            return ""
+        tag, attrs = decoded
+        return f"<{tag}{_attrs_to_html(attrs)}>"
     return ""
 
 
@@ -526,6 +612,8 @@ def _close_marker_tag(name: str) -> str:
         return f"</{name}>"
     if name == "s":
         return "</span>"
+    if name == "x":
+        return "</span>"  # replaced by the decoder stack below
     return ""
 
 
@@ -549,15 +637,20 @@ def _inline_markers_to_html(text: str) -> str:
             parts.append(f'<a href="#{html.escape(value, quote=True)}"><sup>注</sup></a>')
         elif closing:
             if stack and stack[-1][0] == name:
-                stack.pop()
-                parts.append(_close_marker_tag(name))
+                _, open_value = stack.pop()
+                parts.append(f"</{open_value}>" if name == "x" else _close_marker_tag(name))
         elif name in ("b", "i", "u", "s"):
             stack.append((name, value))
             parts.append(_open_marker_tag(name, value))
+        elif name == "x":
+            decoded = _decode_inline_marker(value)
+            if decoded:
+                stack.append((name, decoded[0]))
+                parts.append(_open_marker_tag(name, value))
         # 其余未知标记：忽略
     parts.append(escaped[pos:])
     for name, value in reversed(stack):
-        parts.append(_close_marker_tag(name))
+        parts.append(f"</{value}>" if name == "x" else _close_marker_tag(name))
     return "".join(parts)
 
 
@@ -603,6 +696,9 @@ def metadata_to_dict(metadata: dict) -> dict:
     chapter_css = metadata.get("chapter_css")
     if chapter_css:
         result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
+    structure = metadata.get("document_structure")
+    if structure:
+        result["document_structure"] = structure
     return result
 
 
@@ -631,6 +727,9 @@ def metadata_from_dict(data: dict | None) -> dict:
     chapter_css = data.get("chapter_css")
     if chapter_css:
         result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
+    structure = data.get("document_structure")
+    if structure:
+        result["document_structure"] = structure
     return result
 
 
@@ -668,6 +767,7 @@ def parse_epub(path: Path) -> Book:
     image_items = _collect_image_items(book)
     metadata_images: list[dict] = []
     images_out: dict = {"added": set(), "list": metadata_images}
+    document_structure: dict[str, dict] = {}
 
     for index, idref in enumerate(spine_ids):
         item_id = idref[0] if isinstance(idref, (tuple, list)) else idref
@@ -676,6 +776,11 @@ def parse_epub(path: Path) -> Book:
             continue
         content = _decode_bytes(item.get_content())
         soup = BeautifulSoup(content, "html.parser")
+        document_structure[item_id] = {
+            "html_attrs": _document_attrs(soup.find("html")),
+            "body_attrs": _document_attrs(soup.find("body")),
+            "outer_containers": _outer_container_snapshot(soup.find("body")),
+        }
         linked_css: list[str] = []
         for link in soup.find_all("link"):
             rel = link.get("rel") or []
@@ -710,7 +815,15 @@ def parse_epub(path: Path) -> Book:
             chapter_title = toc_title  # 弱目录标题或空标题
         chapter_title = _normalize_title(chapter_title)  # 只做零宽/空白清理，保留 zalgo 装饰
 
-        blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"])
+        block_names = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "td", "th", "dt", "dd", "pre", "figcaption"}
+        blocks = []
+        for node in soup.find_all(list(block_names)):
+            descendants = [child for child in node.find_all() if getattr(child, "name", None) in block_names]
+            if descendants and node.name not in ("blockquote", "li"):
+                continue
+            if any(getattr(parent, "name", None) in ("blockquote", "li") for parent in node.parents):
+                continue
+            blocks.append(node)
         paragraphs: list[str] = []
         styles: list[ParagraphStyle | None] = []
         seen: set[str] = set()
@@ -750,6 +863,8 @@ def parse_epub(path: Path) -> Book:
                         existing_css.append(css_name)
             if inline_css:
                 doc_inline_css.setdefault(chapters[-1].source_id, []).extend(inline_css)
+            if item_id in document_structure and chapters[-1].source_id not in document_structure:
+                document_structure[chapters[-1].source_id] = document_structure[item_id]
             continue
         if not chapter_title:
             chapter_title = Path(item.get_name()).stem.replace("_", " ").strip() or "未命名"
@@ -783,6 +898,8 @@ def parse_epub(path: Path) -> Book:
         result.metadata["css_resources"] = css_resources
     if metadata_images:
         result.metadata["images"] = metadata_images
+    if document_structure:
+        result.metadata["document_structure"] = document_structure
     return result
 
 
@@ -838,6 +955,8 @@ def _style_attrs(style: BlockStyle) -> str:
     if style.style:
         parts.append(f'style="{html.escape(style.style, quote=True)}"')
     for key, value in style.attrs.items():
+        if str(key).startswith("__"):
+            continue
         parts.append(f'{html.escape(key, quote=True)}="{html.escape(str(value), quote=True)}"')
     return " ".join(parts)
 
@@ -879,6 +998,65 @@ def _ancestors_close(style: ParagraphStyle | None) -> str:
     return "".join(f"</{a.tag}>" for a in reversed(style.ancestors))
 
 
+def _restore_document_attrs(path: Path, structure: dict[str, dict]) -> None:
+    """恢复 ebooklib 模板无法保留的原 XHTML/html、body 属性。"""
+    if not structure or not path.exists():
+        return
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return
+    fd, temp_name = tempfile.mkstemp(prefix=".attrs_", suffix=".epub", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(temp_path, "w") as zout:
+            for info in zin.infolist():
+                content = zin.read(info.filename)
+                if info.filename.lower().endswith((".xhtml", ".html")):
+                    data = structure.get(info.filename)
+                    if data is None:
+                        stem = Path(info.filename).stem
+                        candidates = [key for key in structure if Path(str(key)).stem == stem]
+                        data = structure[candidates[0]] if candidates else None
+                    if data is not None:
+                        if not (data.get("html_attrs") or data.get("body_attrs")):
+                            zout.writestr(info, content)
+                            continue
+                        for tag_name, key in (("html", "html_attrs"), ("body", "body_attrs")):
+                            attrs = data.get(key) or {}
+                            if not attrs:
+                                continue
+                            pattern = re.compile(rb"<" + tag_name.encode("ascii") + rb"\b[^>]*>", re.IGNORECASE)
+                            def append_missing(match):
+                                opening = match.group(0)
+                                additions: list[str] = []
+                                for attr, value in attrs.items():
+                                    if str(attr).startswith("__"):
+                                        continue
+                                    attr_bytes = re.escape(str(attr).encode("utf-8"))
+                                    opening = re.sub(
+                                        rb"\s+" + attr_bytes + rb"\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                                        b"",
+                                        opening,
+                                        flags=re.IGNORECASE,
+                                    )
+                                    if isinstance(value, list):
+                                        value = " ".join(str(item) for item in value)
+                                    additions.append(f' {attr}="{html.escape(str(value), quote=True)}"')
+                                return opening[:-1] + "".join(additions).encode("utf-8") + b">"
+                            content = pattern.sub(
+                                append_missing,
+                                content,
+                                count=1,
+                            )
+                zout.writestr(info, content)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def export_epub(book: Book, path: Path, source_title: str | None = None, sanitizer: Any = None) -> None:
     try:
         from ebooklib import epub
@@ -903,9 +1081,13 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     chapter_css_map = metadata.get("chapter_css") or {}
 
     chapter_items: list = []
+    exported_structure: dict[str, dict] = {}
     for i, chapter in enumerate(book.chapters, start=1):
         file_name = f"chap_{i:04d}.xhtml"
         item = epub.EpubHtml(title=chapter.display_title, file_name=file_name, lang="zh")
+        source_structure = (metadata.get("document_structure") or {}).get(chapter.source_id)
+        if source_structure:
+            exported_structure[file_name] = source_structure
         chapter_css = chapter_css_map.get(chapter.source_id)
         if chapter_css:
             for name in chapter_css:
@@ -994,3 +1176,4 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     epub.write_epub(str(path), out)
+    _restore_document_attrs(path, exported_structure or metadata.get("document_structure") or {})

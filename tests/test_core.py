@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -276,6 +277,41 @@ class EpubInlineFormatTest(unittest.TestCase):
         self.assertIn("\u27e6img:Images/p1.png\u27e7", joined)
         names = [r["name"] for r in book.metadata.get("images", [])]
         self.assertIn("Images/p1.png", names)
+
+    def test_parse_preserves_document_and_inline_attributes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = epub_lib.EpubBook()
+            src.set_identifier("attrs-0001")
+            src.set_title("属性测试")
+            src.set_language("ko")
+            chapter = epub_lib.EpubHtml(uid="attrs.xhtml", title="", file_name="Text/attrs.xhtml", lang="ko")
+            chapter.content = (
+                '<html lang="ko" class="novel"><body id="main" class="reader">'
+                '<h1>제1장</h1><p><span class="important" id="s1" style="color:red">강조</span> '
+                '<a class="ref" href="https://example.com">링크</a></p></body></html>'
+            )
+            src.add_item(chapter)
+            src.toc = (epub_lib.Link("Text/attrs.xhtml", "제1장", "attrs"),)
+            src.add_item(epub_lib.EpubNcx())
+            src.add_item(epub_lib.EpubNav())
+            src.spine = ["nav", chapter]
+            source = Path(tmp) / "attrs.epub"
+            epub_lib.write_epub(str(source), src)
+            book = parse_epub(source)
+            book.metadata.setdefault("document_structure", {})[book.chapters[-1].source_id] = {
+                "html_attrs": {"lang": "ko", "class": "novel"},
+                "body_attrs": {"id": "main", "class": "reader"},
+            }
+            out = Path(tmp) / "attrs-out.epub"
+            export_epub(book, out)
+            with zipfile.ZipFile(out) as archive:
+                chapter_name = next(name for name in archive.namelist() if name.endswith(".xhtml") and "nav" not in name)
+                html = archive.read(chapter_name).decode("utf-8")
+        self.assertIn('class="novel"', html)
+        self.assertIn('id="main"', html)
+        self.assertIn('class="important"', html)
+        self.assertIn('id="s1"', html)
+        self.assertIn('class="ref"', html)
 
     def test_export_restores_inline_markers(self):
         import zipfile

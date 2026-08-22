@@ -233,10 +233,15 @@ def _merge_static_resources(books: list[Book]):
     volume_image_maps: list[dict[str, str]] = []
     volume_css_list: list[list[str]] = []
     volume_css_maps: list[dict[str, list[str]]] = []
+    volume_structures: list[dict[str, dict]] = []
 
     for volume_index, book in enumerate(books, start=1):
         image_map: dict[str, str] = {}
         metadata = book.metadata or {}
+        volume_structures.append({
+            f"v{volume_index}:{sid}": dict(value)
+            for sid, value in (metadata.get("document_structure") or {}).items()
+        })
         raw = list(metadata.get("css_resources") or []) + list(metadata.get("images") or [])
         current_resource_bytes = {
             str(res.get("name", "")): _as_bytes(res.get("content", b""))
@@ -319,7 +324,7 @@ def _merge_static_resources(books: list[Book]):
 
     css_resources = [r for r in resources if r["name"].lower().endswith(".css")]
     images = [r for r in resources if not r["name"].lower().endswith(".css")]
-    return css_resources, images, doc_inline_css, volume_css_list, volume_css_maps, volume_image_maps
+    return css_resources, images, doc_inline_css, volume_css_list, volume_css_maps, volume_image_maps, volume_structures
 
 
 def merge_books(books: list[Book], *, title: str = "") -> Book:
@@ -327,10 +332,11 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
     CSS/图片等静态资源按内容去重合并，正文里的插图标记随改名同步。"""
     chapters: list[Chapter] = []
     prefix = f"{title.strip()} " if title.strip() else ""
-    css_resources, images, doc_inline_css, volume_css_list, volume_css_maps, volume_image_maps = (
+    css_resources, images, doc_inline_css, volume_css_list, volume_css_maps, volume_image_maps, volume_structures = (
         _merge_static_resources(books)
     )
     chapter_css: dict[str, list[str]] = {}
+    document_structure: dict[str, dict] = {}
     for index, book in enumerate(books, start=1):
         volume_node_index = len(chapters)
         chapters.append(
@@ -355,6 +361,8 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
         per_volume_images = (
             volume_image_maps[index - 1] if index - 1 < len(volume_image_maps) else {}
         )
+        if index - 1 < len(volume_structures):
+            document_structure.update(volume_structures[index - 1])
         for chapter in book.chapters:
             new_sid = f"v{index}:{chapter.source_id}" if chapter.source_id else ""
             if new_sid:
@@ -394,6 +402,8 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
         metadata["doc_inline_css"] = doc_inline_css
     if chapter_css:
         metadata["chapter_css"] = chapter_css
+    if document_structure:
+        metadata["document_structure"] = document_structure
     merged.metadata = metadata
     return merged
 
