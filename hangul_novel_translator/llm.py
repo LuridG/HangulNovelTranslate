@@ -46,9 +46,18 @@ class LLMClient:
                     kwargs["response_format"] = {"type": "json_object"}
 
                 response = self.client.chat.completions.create(**kwargs)
-                content = response.choices[0].message.content
+                choice = response.choices[0]
+                message = choice.message
+                content = message.content
                 if content is None:
-                    raise LLMError("模型返回了空 content")
+                    detail = ""
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if finish_reason:
+                        detail += f"（finish_reason={finish_reason}）"
+                    refusal = getattr(message, "refusal", None)
+                    if refusal:
+                        detail += f"；refusal={str(refusal)[:200]}"
+                    raise LLMError(f"模型返回了空 content{detail}")
                 return content
             except Exception as exc:  # noqa: BLE001
                 last_error = exc

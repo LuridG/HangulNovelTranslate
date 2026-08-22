@@ -20,7 +20,9 @@ from hangul_novel_translator.translator import (
     _sanitize_state_name,
     build_chunks,
     collect_sample_text,
+    load_failed_chunks,
     reconcile_paragraphs,
+    save_manual_translation,
 )
 
 
@@ -166,7 +168,115 @@ class TranslatorRetryTest(unittest.TestCase):
                 result = translator.retry_failed(state_path, Glossary(), max_attempts=3)
             finally:
                 translator_module.LLMClient = old
-            self.assertEqual(result, {"found": 0, "recovered": 0, "still_failed": 0})
+            self.assertEqual(
+                result, {"found": 0, "recovered": 0, "still_failed": 0, "missing": 0}
+            )
+
+    def test_load_failed_chunks_stored_paragraphs(self):
+        """新版失败块：直接从存档读取原文，原书不存在也不影响。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "novel.txt"  # 不创建，模拟原书缺失
+            state_path = tmp / ".novel.translation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "source": str(src),
+                        "completed": {},
+                        "failed": {
+                            "ch-00000-00000": {
+                                "error": "模型返回了空 content",
+                                "chapter_index": 0,
+                                "chapter_title": "제1장",
+                                "chunk_index": 0,
+                                "paragraphs": ["가나다", "라마바"],
+                            }
+                        },
+                        "chunk_chars": 1800,
+                        "max_paragraph_chars": 2600,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            items = load_failed_chunks(state_path, AppConfig(resume=True))
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].chunk_id, "ch-00000-00000")
+            self.assertEqual(items[0].paragraphs, ["가나다", "라마바"])
+            self.assertEqual(items[0].chapter_title, "제1장")
+            self.assertFalse(items[0].missing)
+            self.assertIn("空 content", items[0].error)
+
+    def test_load_failed_chunks_legacy_rebuilds(self):
+        """旧版失败块（值=错误字符串）：按原书重新分块还原原文。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            config = AppConfig(resume=True)
+            chunk_id = build_chunks(load_book(src), config)[0].id
+            state_path = self._make_state(tmp, src, chunk_id)
+            items = load_failed_chunks(state_path, config)
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].paragraphs, ["가나다"])
+            self.assertEqual(items[0].chapter_title, "제1장")
+            self.assertFalse(items[0].missing)
+
+    def test_save_manual_translation_writes_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = self._make_source(tmp)
+            chunk_id = "ch-00000-00000"
+            state_path = self._make_state(tmp, src, chunk_id)
+            result = save_manual_translation(state_path, chunk_id, ["译文一", "译文二"])
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(result["completed"], 1)
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["completed"][chunk_id], ["译文一", "译文二"])
+            self.assertNotIn(chunk_id, data["failed"])
+
+    def test_retry_failed_recovers_from_stored_paragraphs_without_source(self):
+        """失败块在存档里持久化了原文，原书缺失也能自包含恢复。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "novel.txt"  # 不实际创建：模拟原书已不存在
+            config = AppConfig(resume=True)
+            chunk_id = "ch-00000-00000"
+            state_path = tmp / ".novel.translation_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "source": str(src),
+                        "completed": {},
+                        "failed": {
+                            chunk_id: {
+                                "error": "boom",
+                                "chapter_index": 0,
+                                "chapter_title": "제1장",
+                                "chunk_index": 0,
+                                "paragraphs": ["가나다"],
+                            }
+                        },
+                        "total_chunks": 1,
+                        "chunk_chars": 1800,
+                        "max_paragraph_chars": 2600,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            fake = FakeLLM(config)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: fake
+            try:
+                translator = Translator(config)
+                result = translator.retry_failed(state_path, Glossary(), max_attempts=3)
+            finally:
+                translator_module.LLMClient = old
+            self.assertEqual(result["recovered"], 1)
+            self.assertEqual(result["missing"], 0)
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn(chunk_id, data["completed"])
+            self.assertNotIn(chunk_id, data["failed"])
 
     def test_translate_file_output_stem(self):
         with tempfile.TemporaryDirectory() as tmp:

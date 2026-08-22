@@ -61,6 +61,19 @@ class TranslationResult:
     output_paths: list[Path]
 
 
+@dataclass
+class FailedChunk:
+    """一处失败块的可视化信息：所属存档 + 原文章节/段落 + 错误原因。"""
+
+    archive: Path
+    chunk_id: str
+    chapter_index: int
+    chapter_title: str
+    error: str
+    paragraphs: list[str] = field(default_factory=list)
+    missing: bool = False
+
+
 def _retry_chunk_config(state: dict, config: AppConfig) -> AppConfig:
     """重试失败块时优先使用翻译时存档的分块参数，避免 chunk 错位。"""
     kwargs: dict[str, Any] = {}
@@ -75,6 +88,107 @@ def _chunk_signature(chunks: list[Chunk]) -> str:
     """章节/分块结构签名：任一分块 id 变化（解析规则、分块参数、章节边界）都会改变签名，
     用于续传前检测旧完成块是否仍能按 id 安全复用。"""
     return hashlib.sha256("\n".join(c.id for c in chunks).encode("utf-8")).hexdigest()
+
+
+def _failed_entry(chunk: Chunk, error: str) -> dict[str, Any]:
+    """失败块入档：除错误原因外，同时持久化原文章节与段落。
+
+    这样重试不再依赖“原书仍在原路径 + 重新解析出同样的分块”，失败块本身自包含、可排查；
+    旧存档（只存错误字符串）仍由 retry_failed 走重新解析回退。
+    """
+    return {
+        "error": error,
+        "chapter_index": chunk.chapter_index,
+        "chapter_title": chunk.chapter_title,
+        "chunk_index": chunk.chunk_index,
+        "paragraphs": list(chunk.paragraphs),
+    }
+
+
+def _chunk_from_failed_entry(chunk_id: str, entry: dict[str, Any]) -> Chunk | None:
+    """由失败块存档还原 Chunk；当 entry 不是含 paragraphs 的字典时返回 None。
+
+    返回 None 表示该失败块没有持久化原文，需要按原书重新分块定位（旧版存档兼容）。
+    """
+    paragraphs = entry.get("paragraphs")
+    if not isinstance(paragraphs, list):
+        return None
+    return Chunk(
+        id=chunk_id,
+        chapter_index=int(entry.get("chapter_index", 0) or 0),
+        chapter_title=str(entry.get("chapter_title", "")),
+        chunk_index=int(entry.get("chunk_index", 0) or 0),
+        paragraphs=[str(p) for p in paragraphs],
+    )
+
+
+def load_failed_chunks(state_path: str | Path, config: AppConfig) -> list[FailedChunk]:
+    """读取翻译存档中的失败块，还原其原文章节与段落。
+
+    新版存档（failed[id] 为含 paragraphs 的字典）直接用持久化原文；旧版字符串存档按原书重新分块定位；
+    仍然定位不到时 missing=True（原文为空）。用于“失败块查看 / 手动编辑”入口。
+    """
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    failed = data.get("failed") or {}
+    if not isinstance(failed, dict):
+        failed = {}
+    cfg = _retry_chunk_config(data, config)
+
+    book = None
+    chunks_by_id: dict[str, Chunk] | None = None
+    items: list[FailedChunk] = []
+    for chunk_id in list(failed.keys()):
+        entry = failed[chunk_id]
+        paragraphs = None
+        chapter_index = 0
+        chapter_title = ""
+        if isinstance(entry, dict):
+            paras = entry.get("paragraphs")
+            if isinstance(paras, list):
+                paragraphs = [str(p) for p in paras]
+                chapter_index = int(entry.get("chapter_index", 0) or 0)
+                chapter_title = str(entry.get("chapter_title", ""))
+        if paragraphs is None and source and source.exists():
+            if chunks_by_id is None:
+                book = load_book(source)
+                chunks_by_id = {c.id: c for c in build_chunks(book, cfg)}
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is not None:
+                paragraphs = list(chunk.paragraphs)
+                chapter_index = chunk.chapter_index
+                chapter_title = chunk.chapter_title
+        error = entry.get("error") if isinstance(entry, dict) else str(entry)
+        items.append(
+            FailedChunk(
+                archive=state_path,
+                chunk_id=chunk_id,
+                chapter_index=chapter_index,
+                chapter_title=chapter_title,
+                error=error,
+                paragraphs=paragraphs or [],
+                missing=paragraphs is None,
+            )
+        )
+    return items
+
+
+def save_manual_translation(
+    state_path: str | Path,
+    chunk_id: str,
+    translated_paragraphs: list[str],
+) -> dict[str, int]:
+    """把手动补翻的译文写回存档：写入 completed、从 failed 移除，返回 {completed, failed} 计数。"""
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    completed = data.setdefault("completed", {})
+    failed = data.setdefault("failed", {})
+    if chunk_id in failed:
+        failed.pop(chunk_id, None)
+    completed[chunk_id] = [str(x) for x in translated_paragraphs]
+    state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"completed": len(completed), "failed": len(failed)}
 
 
 def _sanitize_state_name(stem: str, *, legacy: bool = False) -> str:
@@ -446,32 +560,49 @@ class Translator:
         max_attempts: int = 3,
     ) -> dict[str, int]:
         """读取翻译状态存档中的失败块，逐个重试翻译（最多 max_attempts 次），
-        成功写回 completed 并移出 failed。返回 {"found", "recovered", "still_failed"}。"""
+        成功写回 completed 并移出 failed。
+
+        新版存档会在 failed[chunk_id] 里持久化原文章节与段落，重试直接还原 Chunk，无需原书；
+        旧版存档（failed 值为错误字符串）改为按原书重新分块定位。若无法定位，计入 missing。
+        返回 {"found", "recovered", "still_failed", "missing"}。
+        """
         state_path = Path(state_path)
         data = json.loads(state_path.read_text(encoding="utf-8"))
         source = Path(str(data.get("source", "")))
-        if not source.exists():
-            raise ValueError(f"存档对应的原书不存在：{source}")
         failed = data.get("failed") or {}
         if not isinstance(failed, dict) or not failed:
-            return {"found": 0, "recovered": 0, "still_failed": 0}
+            return {"found": 0, "recovered": 0, "still_failed": 0, "missing": 0}
 
-        book = load_book(source)
-        cfg = _retry_chunk_config(data, self.config)
-        chunks = build_chunks(book, cfg)
-        by_id = {chunk.id: chunk for chunk in chunks}
-
+        book = None
+        by_id: dict[str, Chunk] | None = None
         found = 0
         recovered = 0
         still_failed = 0
+        missing = 0
+        dirty = False
         for chunk_id in list(failed.keys()):
-            chunk = by_id.get(chunk_id)
+            entry = failed[chunk_id]
+            chunk = _chunk_from_failed_entry(chunk_id, entry) if isinstance(entry, dict) else None
             if chunk is None:
-                found += 1
-                still_failed += 1
-                continue
+                # 旧版存档只存错误字符串：按原书重新分块定位；原书缺失则无法定位。
+                if source and source.exists():
+                    if by_id is None:
+                        book = load_book(source)
+                        cfg = _retry_chunk_config(data, self.config)
+                        by_id = {c.id: c for c in build_chunks(book, cfg)}
+                    chunk = by_id.get(chunk_id)
+                if chunk is None:
+                    found += 1
+                    missing += 1
+                    still_failed += 1
+                    reason = "重试失败：找不到对应分块（结构不匹配或原书已变化）"
+                    if isinstance(entry, str) and reason not in entry:
+                        failed[chunk_id] = f"{entry}；{reason}"
+                        dirty = True
+                    continue
             found += 1
             ok = False
+            last_error = ""
             for _ in range(max_attempts):
                 if self.cancel_event.is_set():
                     raise TranslationCancelled()
@@ -479,7 +610,8 @@ class Translator:
                     translated = self._translate_chunk(chunk, glossary)
                 except TranslationCancelled:
                     raise
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    last_error = str(exc)
                     continue
                 completed = data.setdefault("completed", {})
                 completed[chunk_id] = translated
@@ -491,7 +623,31 @@ class Translator:
                 recovered += 1
             else:
                 still_failed += 1
-        return {"found": found, "recovered": recovered, "still_failed": still_failed}
+                # 把本次真实错误写回存档，用户打开 JSON 即可定位原因。
+                if isinstance(entry, dict):
+                    new_error = last_error or str(entry.get("error", ""))
+                    if entry.get("error") != new_error:
+                        entry["error"] = new_error
+                        dirty = True
+                elif last_error:
+                    failed[chunk_id] = f"{entry}；重试错误：{last_error}"
+                    dirty = True
+        if dirty:
+            self._save_state(state_path, data)
+        return {"found": found, "recovered": recovered, "still_failed": still_failed, "missing": missing}
+
+    def load_failed_chunks(
+        self,
+        state_path: str | Path,
+        *,
+        config: AppConfig | None = None,
+    ) -> list[FailedChunk]:
+        """读取存档里的失败块并还原原文章节/段落，供“失败块查看/手动编辑”使用。
+
+        新版存档（failed 值为含 paragraphs 的字典）直接用持久化原文；旧版字符串存档按原书重新分块定位；
+        仍无法定位时标记 missing=True（正文为空）。
+        """
+        return load_failed_chunks(state_path, config or self.config)
 
     def _safe_process_one(self, chunk, glossary, completed, failed, state, state_path):
         try:
@@ -500,7 +656,7 @@ class Translator:
             raise
         except Exception as exc:  # noqa: BLE001
             with self._state_lock:
-                failed[chunk.id] = str(exc)
+                failed[chunk.id] = _failed_entry(chunk, str(exc))
             self._save_state(state_path, state)
             raise
 
@@ -515,7 +671,7 @@ class Translator:
             self._save_state(state_path, state)
         except Exception as exc:  # noqa: BLE001
             with self._state_lock:
-                failed[chunk.id] = str(exc)
+                failed[chunk.id] = _failed_entry(chunk, str(exc))
             self._save_state(state_path, state)
             raise
 
