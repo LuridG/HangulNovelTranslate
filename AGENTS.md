@@ -22,6 +22,24 @@ the GUI is broken. When this happens:
    git diff --check, source inspection, and fixture-level tests for the sandbox-side checks.
 6. Record the exact exit code. -1073741790 is 0xC0000022; treat it as an access-denied launch failure.
 
+## Confirmed Working Validation Commands
+
+The following commands were verified in this workspace during EPUB parser validation:
+
+- From PowerShell, invoke the BAT through cmd /c and redirect stdin so the trailing pause does not block:
+  cmd /c "start.bat --help <nul"
+- For a real project-runtime EPUB smoke check, use the repository interpreter with an escalated command if the
+  sandbox blocks it. Avoid printing Korean/Hangul paths directly because the Windows GBK console can raise
+  UnicodeEncodeError after parsing has already succeeded:
+  .venv\\Scripts\\python.exe -c "from pathlib import Path; from hangul_novel_translator.book import load_book; p=next(x for x in Path('data').rglob('*.epub') if x.stat().st_size == 421511); b=load_book(p); print('PARSED', len(b.chapters), b.total_chars)"
+- Append ; Write-Output "EXIT=$LASTEXITCODE" to record the exact process exit code for the previous command.
+- For static validation when the project interpreter cannot be launched, use the bundled runtime:
+  C:\\Users\\Lurid\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe -m py_compile ...
+- The same bundled runtime can run dependency-independent fixture tests, for example:
+  ...\\python.exe -m unittest tests.test_core.EpubReaderRepairTest.test_dangling_manifest_reference_is_removed_from_reader_copy -v
+- A test output of OK (skipped=...) for EPUB tests under the bundled runtime may only mean ebooklib is absent;
+  use the repository .venv for actual EPUB parsing, and distinguish missing dependencies from code failures.
+
 ## GUI Verification Checklist
 
 - Open the app with start.bat.

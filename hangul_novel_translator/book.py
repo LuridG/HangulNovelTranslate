@@ -11,6 +11,7 @@ import tempfile
 import unicodedata
 import zlib
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -187,6 +188,86 @@ def _relative_epub_href(document_path: str, resource_path: str) -> str:
     """把包内资源路径转换为相对于 XHTML 文档的 href。"""
     document_dir = posixpath.dirname(document_path) or "."
     return posixpath.relpath(resource_path, start=document_dir)
+
+
+def _epub_package_path(base: str, href: str) -> str:
+    """把 OPF 中的 href 解析为规范化的包内路径。"""
+    value = html.unescape(unquote(str(href or ""))).replace("\\", "/")
+    value = value.split("#", 1)[0].split("?", 1)[0]
+    return posixpath.normpath(posixpath.join(base, value)).lstrip("/")
+
+
+def _prepare_epub_for_reader(path: Path) -> tuple[Path, Path | None]:
+    """为 EPUB 阅读器创建临时副本，移除 OPF 中指向不存在文件的条目。"""
+    path = Path(path)
+    with zipfile.ZipFile(path, "r") as zin:
+        names = set(zin.namelist())
+        try:
+            container_root = ET.fromstring(zin.read("META-INF/container.xml"))
+        except (KeyError, ET.ParseError):
+            return path, None
+
+        opf_paths = [
+            node.attrib.get("full-path", "")
+            for node in container_root.iter()
+            if node.tag.rsplit("}", 1)[-1] == "rootfile"
+        ]
+        replacements: dict[str, bytes] = {}
+        for opf_path in opf_paths:
+            if not opf_path or opf_path not in names:
+                continue
+            try:
+                root = ET.fromstring(zin.read(opf_path))
+            except ET.ParseError:
+                continue
+            base = posixpath.dirname(opf_path)
+            manifest = next(
+                (node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "manifest"),
+                None,
+            )
+            if manifest is None:
+                continue
+            removed_ids: set[str] = set()
+            for item in list(manifest):
+                if item.tag.rsplit("}", 1)[-1] != "item":
+                    continue
+                package_path = _epub_package_path(base, item.attrib.get("href", ""))
+                if package_path in names:
+                    continue
+                item_id = item.attrib.get("id")
+                if item_id:
+                    removed_ids.add(item_id)
+                manifest.remove(item)
+            if not removed_ids:
+                continue
+            for spine in root.iter():
+                if spine.tag.rsplit("}", 1)[-1] != "spine":
+                    continue
+                for itemref in list(spine):
+                    if (itemref.tag.rsplit("}", 1)[-1] == "itemref" and
+                            itemref.attrib.get("idref") in removed_ids):
+                        spine.remove(itemref)
+            replacements[opf_path] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+        if not replacements:
+            return path, None
+        temp_handle = tempfile.NamedTemporaryFile(
+            prefix=f".{path.stem}.epub-", suffix=".epub", delete=False
+        )
+        temp_path = Path(temp_handle.name)
+        temp_handle.close()
+        try:
+            with zipfile.ZipFile(temp_path, "w") as zout:
+                for info in zin.infolist():
+                    content = replacements.get(info.filename, zin.read(info.filename))
+                    zout.writestr(info, content)
+        except Exception:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return temp_path, temp_path
 
 
 def _toc_href(entry) -> str:
@@ -745,7 +826,15 @@ def parse_epub(path: Path) -> Book:
     except ImportError:
         ITEM_DOCUMENT = getattr(epub, "ITEM_DOCUMENT", 9)
 
-    book = epub.read_epub(str(path), options={"ignore_ncx": True})
+    reader_path, temp_path = _prepare_epub_for_reader(path)
+    try:
+        book = epub.read_epub(str(reader_path), options={"ignore_ncx": True})
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
     title_values = book.get_metadata("DC", "title")
     title = str(title_values[0][0]) if title_values else path.stem
 

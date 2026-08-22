@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hangul_novel_translator.book import (
+    _prepare_epub_for_reader,
     export_epub,
     parse_epub,
     parse_txt,
@@ -120,6 +121,50 @@ class TocTreeTest(unittest.TestCase):
         )
         self.assertEqual(_build_toc_tree(book.chapters), ((0, (1,)),))
 
+
+class EpubReaderRepairTest(unittest.TestCase):
+    def test_dangling_manifest_reference_is_removed_from_reader_copy(self):
+        from hangul_novel_translator.book import _prepare_epub_for_reader
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "broken.epub"
+            opf = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest>
+    <item id="chapter" href="Text/chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="titlepage" href="Text/titlepage.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="titlepage"/>
+    <itemref idref="chapter"/>
+  </spine>
+</package>"""
+            container = """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"""
+            chapter = b"<html><body><p>Hello</p></body></html>"
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("mimetype", "application/epub+zip")
+                archive.writestr("META-INF/container.xml", container)
+                archive.writestr("OEBPS/content.opf", opf)
+                archive.writestr("OEBPS/Text/chapter.xhtml", chapter)
+
+            reader_path, temp_path = _prepare_epub_for_reader(source)
+            try:
+                self.assertIsNotNone(temp_path)
+                with zipfile.ZipFile(reader_path) as archive:
+                    repaired = archive.read("OEBPS/content.opf").decode("utf-8")
+                    self.assertNotIn('id="titlepage"', repaired)
+                    self.assertNotIn('idref="titlepage"', repaired)
+                    self.assertIn('id="chapter"', repaired)
+                    self.assertIn('idref="chapter"', repaired)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+            with zipfile.ZipFile(source) as archive:
+                original = archive.read("OEBPS/content.opf").decode("utf-8")
+                self.assertIn('id="titlepage"', original)
 
 @unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
 class EpubParsingRegressionTest(unittest.TestCase):
