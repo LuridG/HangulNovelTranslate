@@ -9,6 +9,8 @@ from hangul_novel_translator.book import (
     export_epub,
     parse_epub,
     parse_txt,
+    _relative_epub_href,
+    _resolve_epub_path,
     _has_skip_text_marker,
     _strip_invisible_chars,
 )
@@ -33,6 +35,12 @@ class TxtParsingTest(unittest.TestCase):
         self.assertEqual(book.chapters[0].title, "제1장 시작")
         self.assertEqual(len(book.chapters[0].paragraphs), 2)
         self.assertEqual(book.chapters[1].title, "제2장 전개")
+
+    def test_epub_path_resolution_keeps_directories(self):
+        self.assertEqual(_resolve_epub_path("Text/chap.xhtml", "../Styles/main.css"), "Styles/main.css")
+        self.assertEqual(_resolve_epub_path("Text/chap.xhtml", "../Fonts/font.ttf?v=1#x"), "Fonts/font.ttf")
+        self.assertEqual(_relative_epub_href("chap_0001.xhtml", "Styles/main.css"), "Styles/main.css")
+        self.assertEqual(_relative_epub_href("Text/chap_0001.xhtml", "Styles/main.css"), "../Styles/main.css")
 
     def test_no_headings_fallback(self):
         raw = "문장 하나.\n문장 둘.\n"
@@ -216,6 +224,7 @@ class EpubStylePreservationTest(unittest.TestCase):
                 self.assertIn("<blockquote>", chapter_html)
                 self.assertIn('class="letter"', chapter_html)
                 self.assertIn('rel="stylesheet"', chapter_html)
+                self.assertIn('href="Styles/main.css"', chapter_html)
 
 
 
@@ -311,6 +320,10 @@ class EpubInlineFormatTest(unittest.TestCase):
         self.assertEqual(
             restored["doc_inline_css"], {"chap.xhtml": ["p { color: red; }"]}
         )
+
+        meta["chapter_css"] = {"chap.xhtml": ["Styles/main.css"]}
+        restored = metadata_from_dict(jsonlib.loads(jsonlib.dumps(metadata_to_dict(meta))))
+        self.assertEqual(restored["chapter_css"], {"chap.xhtml": ["Styles/main.css"]})
 
 
 

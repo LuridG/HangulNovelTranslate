@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import html
+import posixpath
 import re
 import unicodedata
 import zlib
@@ -162,6 +163,26 @@ def _href_basename(href: str) -> str:
         return Path(path).name
     except Exception:
         return href
+
+
+def _resolve_epub_path(base_path: str, href: str) -> str:
+    """按 EPUB 包内路径解析相对引用，保留完整路径并去掉 query/fragment。"""
+    try:
+        parsed = urlparse(str(href))
+        target = unquote(parsed.path).replace("\\", "/")
+        if not target:
+            return ""
+        base = posixpath.dirname(str(base_path).replace("\\", "/"))
+        resolved = posixpath.normpath(posixpath.join(base, target))
+        return resolved.lstrip("/")
+    except Exception:
+        return str(href).replace("\\", "/")
+
+
+def _relative_epub_href(document_path: str, resource_path: str) -> str:
+    """把包内资源路径转换为相对于 XHTML 文档的 href。"""
+    document_dir = posixpath.dirname(document_path) or "."
+    return posixpath.relpath(resource_path, start=document_dir)
 
 
 def _toc_href(entry) -> str:
@@ -353,16 +374,19 @@ def _collect_css_resources(book) -> list[dict]:
             except Exception:
                 pass
     referenced: set[str] = set()
-    for css in css_texts:
+    css_names = [str(item.get_name()) for item in book.get_items() if item.get_type() == ITEM_STYLE]
+    for css_name, css in zip(css_names, css_texts):
         for url in _css_urls(css):
-            referenced.add(_href_basename(url))
+            referenced.add(_resolve_epub_path(css_name, url))
     for item in book.get_items():
         if item.get_name() in added_names:
             continue
         if item.get_type() == ITEM_FONT:
             resources.append({"name": item.get_name(), "content": bytes(item.get_content())})
             added_names.add(item.get_name())
-        elif item.get_type() == ITEM_IMAGE and _href_basename(item.get_name()) in referenced:
+        elif item.get_type() == ITEM_IMAGE:
+            # 保留 EPUB 内全部图片：嵌套 @import、未出现在正文的背景图和封面图都不能因
+            # 当前章节解析不到直接引用而丢失；导出阶段会按原包内路径复用。
             resources.append({"name": item.get_name(), "content": bytes(item.get_content())})
             added_names.add(item.get_name())
     return resources
@@ -400,8 +424,7 @@ def _inline_style_css(tag) -> str:
 def _resolve_href(base_href: str, src: str) -> str:
     """以章节文件为基准，把 img src 解析为 epub 包内路径。"""
     try:
-        joined = urljoin(base_href, src)
-        return unquote(urlparse(joined).path).lstrip("/")
+        return _resolve_epub_path(base_href, src)
     except Exception:
         return src
 
@@ -538,6 +561,15 @@ def _inline_markers_to_html(text: str) -> str:
     return "".join(parts)
 
 
+def _rewrite_inline_image_hrefs(text: str, document_path: str) -> str:
+    """把包内图片路径转换成相对于当前 XHTML 文档的路径。"""
+    return re.sub(
+        r"⟦img:([^⟧]*)⟧",
+        lambda match: f"⟦img:{_relative_epub_href(document_path, match.group(1))}⟧",
+        text,
+    )
+
+
 def strip_inline_markers(text: str, *, image_placeholder: str = "【插图】") -> str:
     """去掉行内格式标记，用于 TXT 输出与词表采样。"""
     def _repl(match) -> str:
@@ -568,6 +600,9 @@ def metadata_to_dict(metadata: dict) -> dict:
     inline = metadata.get("doc_inline_css")
     if inline:
         result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
+    chapter_css = metadata.get("chapter_css")
+    if chapter_css:
+        result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
     return result
 
 
@@ -593,6 +628,9 @@ def metadata_from_dict(data: dict | None) -> dict:
     inline = data.get("doc_inline_css")
     if inline:
         result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
+    chapter_css = data.get("chapter_css")
+    if chapter_css:
+        result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
     return result
 
 
@@ -625,6 +663,7 @@ def parse_epub(path: Path) -> Book:
     skip_filename_markers = ("cover", "copyright", "toc", "titlepage", "colophon", "frontmatter", "backmatter", "nav")
 
     doc_inline_css: dict[str, list[str]] = {}
+    chapter_css: dict[str, list[str]] = {}
     css_resources = _collect_css_resources(book)
     image_items = _collect_image_items(book)
     metadata_images: list[dict] = []
@@ -637,6 +676,17 @@ def parse_epub(path: Path) -> Book:
             continue
         content = _decode_bytes(item.get_content())
         soup = BeautifulSoup(content, "html.parser")
+        linked_css: list[str] = []
+        for link in soup.find_all("link"):
+            rel = link.get("rel") or []
+            rel_values = [str(value).lower() for value in rel] if isinstance(rel, list) else [str(rel).lower()]
+            href = link.get("href") or ""
+            if "stylesheet" in rel_values and href:
+                resolved_css = _resolve_epub_path(item.get_name(), href)
+                if resolved_css and resolved_css not in linked_css:
+                    linked_css.append(resolved_css)
+        if linked_css:
+            chapter_css[item_id] = linked_css
         inline_css = [st.get_text() for st in soup.find_all("style")]
         if inline_css:
             doc_inline_css.setdefault(item_id, []).extend(inline_css)
@@ -693,6 +743,11 @@ def parse_epub(path: Path) -> Book:
             # 无标题页面视为上一章的续篇正文页，并入上一章，不产生“第 X 节”式假章节名。
             chapters[-1].paragraphs.extend(paragraphs)
             chapters[-1].styles.extend(styles)
+            if linked_css:
+                existing_css = chapter_css.setdefault(chapters[-1].source_id, [])
+                for css_name in linked_css:
+                    if css_name not in existing_css:
+                        existing_css.append(css_name)
             if inline_css:
                 doc_inline_css.setdefault(chapters[-1].source_id, []).extend(inline_css)
             continue
@@ -722,6 +777,8 @@ def parse_epub(path: Path) -> Book:
     result = Book(title=title, chapters=chapters, source_path=path)
     if doc_inline_css:
         result.metadata["doc_inline_css"] = doc_inline_css
+    if chapter_css:
+        result.metadata["chapter_css"] = chapter_css
     if css_resources:
         result.metadata["css_resources"] = css_resources
     if metadata_images:
@@ -835,7 +892,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     out.set_language("zh")
 
     metadata = book.metadata or {}
-    css_resources: list[dict] = metadata.get("css_resources") or []
+    css_resources: list[dict] = list(metadata.get("css_resources") or [])
     doc_inline_css: dict[str, list[str]] = metadata.get("doc_inline_css") or {}
 
     css_names = {
@@ -852,10 +909,10 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
         chapter_css = chapter_css_map.get(chapter.source_id)
         if chapter_css:
             for name in chapter_css:
-                item.add_link(href=name, rel="stylesheet", type="text/css")
+                item.add_link(href=_relative_epub_href(file_name, name), rel="stylesheet", type="text/css")
         else:
             for name in sorted(css_names):
-                item.add_link(href=name, rel="stylesheet", type="text/css")
+                item.add_link(href=_relative_epub_href(file_name, name), rel="stylesheet", type="text/css")
         inline_styles = doc_inline_css.get(chapter.source_id) or []
         if inline_styles:
             # 原文档的内联 <style> 转成独立 CSS 项，只挂到对应章节。
@@ -884,7 +941,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                     body.append(_ancestors_open(style))
                 prev_key = key
                 prev_style = style
-            body.append(_block_to_html(style, cleaned_para))
+            body.append(_block_to_html(style, _rewrite_inline_image_hrefs(cleaned_para, file_name)))
             first = False
         if not first and prev_style is not None:
             body.append(_ancestors_close(prev_style))

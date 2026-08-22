@@ -195,6 +195,40 @@ class MergeStyleResourceTest(unittest.TestCase):
         self.assertIn("\u27e6img:Images/p1.png\u27e7", paras[0])
         self.assertIn("\u27e6img:Images/p1_v2.png\u27e7", paras[1])
 
+    def test_merge_rewrites_css_relative_resources_with_full_paths(self):
+        b1 = Book(
+            title="卷一",
+            chapters=[Chapter(0, "第1章", ["正文"], source_id="Text/chap.xhtml")],
+            metadata={
+                "css_resources": [
+                    {"name": "Styles/main.css", "content": b"@import 'nested/extra.css'; body { background: url('../Images/bg.png'); }"},
+                    {"name": "Styles/nested/extra.css", "content": b"@font-face { src: url('../../Fonts/main.woff2'); }"},
+                    {"name": "Images/bg.png", "content": b"BG1"},
+                    {"name": "Fonts/main.woff2", "content": b"FONT1"},
+                ],
+                "chapter_css": {"Text/chap.xhtml": ["Styles/main.css"]},
+            },
+        )
+        b2 = Book(
+            title="卷二",
+            chapters=[Chapter(0, "第1章", ["正文"], source_id="Text/chap.xhtml")],
+            metadata={
+                "css_resources": [
+                    {"name": "Styles/main.css", "content": b"@import 'nested/extra.css'; body { background: url('../Images/bg.png'); }"},
+                    {"name": "Styles/nested/extra.css", "content": b"@font-face { src: url('../../Fonts/main.woff2'); }"},
+                    {"name": "Images/bg.png", "content": b"BG2"},
+                    {"name": "Fonts/main.woff2", "content": b"FONT2"},
+                ],
+                "chapter_css": {"Text/chap.xhtml": ["Styles/main.css"]},
+            },
+        )
+        merged = merge_books([b1, b2], title="合集")
+        css = {item["name"]: item["content"] for item in merged.metadata["css_resources"]}
+        self.assertIn("Styles/main_v2.css", css)
+        self.assertIn("Styles/nested/extra_v2.css", css)
+        self.assertIn(b"main_v2.woff2", css["Styles/nested/extra_v2.css"])
+        self.assertIn(b"bg_v2.png", css["Styles/main_v2.css"])
+
     def test_book_from_state_restores_metadata(self):
         import base64
 
