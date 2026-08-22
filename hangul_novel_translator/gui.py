@@ -138,6 +138,7 @@ class TreeviewTooltip:
 THEME = {
     "bg": "#0D1117",
     "card": "#161B22",
+    "card_alt": "#1C2128",
     "card_border": "#30363D",
     "input_bg": "#0D1117",
     "accent": "#238636",
@@ -150,6 +151,7 @@ THEME = {
     "secondary_hover": "#30363D",
     "text_main": "#F0F6FC",
     "text_muted": "#8B949E",
+    "text_subtle": "#6E7681",
 }
 
 
@@ -161,12 +163,13 @@ def _apply_ttk_theme(root):
         pass
     style.configure(
         "Custom.Treeview",
-        background="#161B22",
+        background=THEME["card"],
         foreground="#E6EDF3",
-        fieldbackground="#161B22",
-        rowheight=36,
-        font=("Microsoft YaHei UI", 12),
+        fieldbackground=THEME["card"],
+        rowheight=32,
+        font=("Microsoft YaHei UI", 11),
         borderwidth=0,
+        relief="flat",
     )
     style.map(
         "Custom.Treeview",
@@ -177,9 +180,9 @@ def _apply_ttk_theme(root):
         "Custom.Treeview.Heading",
         background="#21262D",
         foreground="#C9D1D9",
-        font=("Microsoft YaHei UI", 12, "bold"),
+        font=("Microsoft YaHei UI", 11, "bold"),
         relief="flat",
-        padding=(8, 6),
+        padding=(8, 5),
     )
     style.map(
         "Custom.Treeview.Heading",
@@ -777,10 +780,10 @@ class App(ctk.CTk):
             try:
                 self.geometry(saved_geom)
             except Exception:
-                self.geometry("1180x760")
+                self.geometry("1360x860")
         else:
-            self.geometry("1180x760")
-        self.minsize(960, 640)
+            self.geometry("1360x860")
+        self.minsize(1120, 720)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # 用户拖动/移动窗口时防抖落盘，即使进程被强杀也能保留上次尺寸。
         self.bind("<Configure>", self._on_window_configure, add="+")
@@ -809,18 +812,19 @@ class App(ctk.CTk):
 
     # ---------------- UI ----------------
     def _build_layout(self):
-        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(0, weight=0, minsize=360)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(1, weight=0, minsize=156)
 
-        left = ctk.CTkFrame(self, width=420)
-        left.grid(row=0, column=0, padx=12, pady=12, sticky="nsw")
+        left = ctk.CTkFrame(self, width=360, corner_radius=8, border_width=1, border_color=THEME["card_border"])
+        left.grid(row=0, column=0, padx=(14, 8), pady=14, sticky="nsew")
         left.grid_columnconfigure(1, weight=1)
+        left.grid_rowconfigure(2, weight=1)
         self._build_left(left)
 
-        right = ctk.CTkFrame(self)
-        right.grid(row=0, column=1, padx=(0, 12), pady=12, sticky="nsew")
+        right = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=THEME["card_border"])
+        right.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
 
@@ -832,27 +836,40 @@ class App(ctk.CTk):
         self.tab_merge = self.tabs.add("多卷修正")
         self.tab_fixer = self.tabs.add("成品矫正")
         self.tab_settings = self.tabs.add("设置")
+        self.tabs.configure(
+            corner_radius=8,
+            border_width=0,
+            segmented_button_fg_color=THEME["card_alt"],
+            segmented_button_selected_color=THEME["primary"],
+            segmented_button_selected_hover_color=THEME["primary_hover"],
+            segmented_button_unselected_color=THEME["card_alt"],
+            segmented_button_unselected_hover_color=THEME["secondary_hover"],
+        )
         self._build_right(self.tab_glossary)
         self._build_merge_tab(self.tab_merge)
         self._build_fixer_tab(self.tab_fixer)
         self._build_settings_tab(self.tab_settings)
 
-        bottom = ctk.CTkFrame(self)
-        bottom.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="ew")
+        bottom = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=THEME["card_border"])
+        bottom.grid(row=1, column=0, columnspan=2, padx=14, pady=(0, 14), sticky="nsew")
         bottom.grid_columnconfigure(0, weight=1)
         self._build_bottom(bottom)
 
     def _build_left(self, parent):
         row = 0
+        ctk.CTkLabel(parent, text="工作区", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_main"]).grid(
+            row=row, column=0, columnspan=2, padx=14, pady=(14, 2), sticky="w"
+        )
+        row += 1
         ctk.CTkLabel(parent, text="书籍文件（多本=同一小说的不同卷，按顺序）", anchor="w").grid(
-            row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w"
+            row=row, column=0, columnspan=2, padx=14, pady=(10, 2), sticky="w"
         )
         self.input_files: list[Path] = []
         input_style = ttk.Style(self)
-        input_style.configure("Input.Treeview", font=tkfont.Font(size=13), rowheight=30)
-        input_style.configure("Input.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
+        input_style.configure("Input.Treeview", font=tkfont.Font(size=11), rowheight=30)
+        input_style.configure("Input.Treeview.Heading", font=tkfont.Font(size=11, weight="bold"))
         list_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        list_frame.grid(row=row + 1, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
+        list_frame.grid(row=row + 1, column=0, columnspan=2, padx=14, pady=4, sticky="nsew")
         list_frame.grid_columnconfigure(0, weight=1)
         list_frame.grid_rowconfigure(0, weight=1)
         self.input_tree = ttk.Treeview(
@@ -875,7 +892,7 @@ class App(ctk.CTk):
         TreeviewTooltip(self.input_tree)
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
-        btns.grid(row=row + 2, column=0, columnspan=2, padx=12, pady=2, sticky="ew")
+        btns.grid(row=row + 2, column=0, columnspan=2, padx=10, pady=4, sticky="ew")
         ctk.CTkButton(btns, text="＋ 添加文件", width=105, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._add_input_files).grid(row=0, column=0, padx=4)
         ctk.CTkButton(btns, text="↑ 上移", width=56, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=lambda: self._move_input_file(-1)).grid(row=0, column=1, padx=4)
         ctk.CTkButton(btns, text="↓ 下移", width=56, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=lambda: self._move_input_file(1)).grid(row=0, column=2, padx=4)
@@ -884,7 +901,7 @@ class App(ctk.CTk):
 
         row += 3
         ctk.CTkLabel(parent, text="小说名（可空，留空则按源文件名命名）", anchor="w").grid(
-            row=row, column=0, columnspan=2, padx=12, pady=(14, 2), sticky="w"
+            row=row, column=0, columnspan=2, padx=14, pady=(12, 2), sticky="w"
         )
         self.novel_name_var = tk.StringVar(value="")
         ctk.CTkEntry(parent, textvariable=self.novel_name_var).grid(
@@ -1146,8 +1163,8 @@ class App(ctk.CTk):
         tree_frame.grid_rowconfigure(0, weight=1)
 
         style = ttk.Style(self)
-        style.configure("Glossary.Treeview", font=tkfont.Font(size=13), rowheight=34)
-        style.configure("Glossary.Treeview.Heading", font=tkfont.Font(size=13, weight="bold"))
+        style.configure("Glossary.Treeview", font=tkfont.Font(size=11), rowheight=32)
+        style.configure("Glossary.Treeview.Heading", font=tkfont.Font(size=11, weight="bold"))
 
         self.columns = ("ko", "zh", "kind", "note", "alternatives", "confirmed")
         self.sort_col = ""
@@ -1346,22 +1363,24 @@ class App(ctk.CTk):
         self._fixer_refresh_glossary()
 
     def _build_bottom(self, parent):
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
         status_bar = ctk.CTkFrame(parent, fg_color="transparent")
-        status_bar.grid(row=0, column=0, padx=12, pady=(10, 4), sticky="ew")
+        status_bar.grid(row=0, column=0, padx=14, pady=(10, 4), sticky="ew")
         status_bar.grid_columnconfigure(1, weight=1)
-        self.progress = ctk.CTkProgressBar(status_bar, width=260)
+        self.progress = ctk.CTkProgressBar(status_bar, width=240, height=8, corner_radius=4, progress_color=THEME["primary"])
         self.progress.set(0)
         self.progress.grid(row=0, column=0, padx=(0, 12))
         self.status_var = tk.StringVar(value="就绪")
-        ctk.CTkLabel(status_bar, textvariable=self.status_var, anchor="w").grid(row=0, column=1, sticky="ew")
+        ctk.CTkLabel(status_bar, textvariable=self.status_var, anchor="w", text_color=THEME["text_muted"]).grid(row=0, column=1, sticky="ew")
         self.start_btn = ctk.CTkButton(status_bar, text="▶ 开始翻译", width=120, height=34, font=ctk.CTkFont(size=13, weight="bold"), fg_color=THEME["accent"], hover_color=THEME["accent_hover"], command=self._start_translation)
         self.start_btn.grid(row=0, column=2, padx=6)
         self.stop_btn = ctk.CTkButton(status_bar, text="⏹ 停止", width=80, height=34, font=ctk.CTkFont(size=13, weight="bold"), fg_color=THEME["danger"], hover_color=THEME["danger_hover"], command=self._stop)
         self.stop_btn.grid(row=0, column=3, padx=6)
         self.stop_btn.configure(state="disabled")
 
-        self.log_box = ctk.CTkTextbox(parent, height=110)
-        self.log_box.grid(row=1, column=0, padx=12, pady=(4, 10), sticky="ew")
+        self.log_box = ctk.CTkTextbox(parent, height=110, corner_radius=6, border_width=1, border_color=THEME["card_border"], fg_color=THEME["bg"], text_color=THEME["text_muted"])
+        self.log_box.grid(row=1, column=0, padx=14, pady=(4, 10), sticky="nsew")
         self.log_box.configure(state="disabled")
 
     # ---------------- 导出清洗器 ----------------

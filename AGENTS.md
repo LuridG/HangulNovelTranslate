@@ -35,6 +35,7 @@ the GUI is broken. When this happens:
 
 ## Change Safety
 
+- 所有 Git commit 的提交信息必须使用中文；不要使用英文 commit message。
 - Preserve unrelated user changes in a dirty worktree.
 - Use apply_patch for manual edits.
 - Do not delete or reset files to recover from a failed validation attempt.
