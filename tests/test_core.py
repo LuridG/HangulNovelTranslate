@@ -344,7 +344,7 @@ class EpubInlineFormatTest(unittest.TestCase):
             epub_lib.write_epub(str(source), src)
             book = parse_epub(source)
             book.metadata.setdefault("document_structure", {})[book.chapters[-1].source_id] = {
-                "html_attrs": {"lang": "ko", "class": "novel"},
+                "html_attrs": {"lang": "ko", "xml:lang": "ko", "class": "novel"},
                 "body_attrs": {"id": "main", "class": "reader"},
             }
             out = Path(tmp) / "attrs-out.epub"
@@ -353,6 +353,9 @@ class EpubInlineFormatTest(unittest.TestCase):
                 chapter_name = next(name for name in archive.namelist() if name.endswith(".xhtml") and "nav" not in name)
                 html = archive.read(chapter_name).decode("utf-8")
         self.assertIn('class="novel"', html)
+        self.assertIn('lang="zh"', html)
+        self.assertIn('xml:lang="zh"', html)
+        self.assertNotIn('lang="ko"', html)
         self.assertIn('id="main"', html)
         self.assertIn('class="important"', html)
         self.assertIn('id="s1"', html)

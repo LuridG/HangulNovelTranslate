@@ -1037,6 +1037,31 @@ def _mime_for_name(name: str) -> str:
     }.get(ext, "application/octet-stream")
 
 
+def _contains_cjk_text(value: str) -> bool:
+    """检测中日韩统一表意文字；用于只对中文翻译启用字体兼容层。"""
+    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", value or ""))
+
+
+def _needs_cjk_font_fallback(metadata: dict, chapters: list[Chapter]) -> bool:
+    """仅命中原书使用 Gulim 且译文包含中文的 EPUB。"""
+    css_text = "\n".join(
+        _as_text(res.get("content", b""))
+        for res in metadata.get("css_resources") or []
+        if str(res.get("name", "")).lower().endswith(".css")
+    )
+    return bool(re.search(r"굴림|gulim", css_text, re.IGNORECASE)) and any(
+        _contains_cjk_text(paragraph)
+        for chapter in chapters
+        for paragraph in chapter.paragraphs
+    )
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value or "")
+
+
 def _style_attrs(style: BlockStyle) -> str:
     parts: list[str] = []
     if style.klass:
@@ -1123,6 +1148,11 @@ def _restore_document_attrs(path: Path, structure: dict[str, dict]) -> None:
                                 for attr, value in attrs.items():
                                     if str(attr).startswith("__"):
                                         continue
+                                    # 正文已经翻译为中文，语言属性必须保留 EpubHtml(lang="zh")
+                                    # 生成的值。恢复源书的 ko/en 会让阅读器按错误语言选择
+                                    # CJK 回退字体；class/style/id 等排版属性仍完整恢复。
+                                    if tag_name == "html" and str(attr).lower() in ("lang", "xml:lang"):
+                                        continue
                                     attr_bytes = re.escape(str(attr).encode("utf-8"))
                                     opening = re.sub(
                                         rb"\s+" + attr_bytes + rb"\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
@@ -1161,6 +1191,18 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     metadata = book.metadata or {}
     css_resources: list[dict] = list(metadata.get("css_resources") or [])
     doc_inline_css: dict[str, list[str]] = metadata.get("doc_inline_css") or {}
+    needs_cjk_fallback = _needs_cjk_font_fallback(metadata, book.chapters)
+    fallback_css_name = "Styles/zh_font_fallback.css"
+    if needs_cjk_fallback:
+        css_resources.append({
+            "name": fallback_css_name,
+            "content": (
+                '.zh-font-fallback p, .zh-font-fallback h1, .zh-font-fallback h2, '
+                '.zh-font-fallback h3, .zh-font-fallback h4, .zh-font-fallback h5, '
+                '.zh-font-fallback h6 { font-family: "Microsoft YaHei", '
+                '"Noto Sans CJK SC", "Noto Sans SC", sans-serif !important; }'
+            ).encode("utf-8"),
+        })
 
     css_names = {
         str(res["name"])
@@ -1195,7 +1237,10 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                     "content": ("\n".join(inline_styles)).encode("utf-8"),
                 }
             )
+        if needs_cjk_fallback:
+            item.add_link(href=_relative_epub_href(file_name, fallback_css_name), rel="stylesheet", type="text/css")
         body = [
+            '<div class="zh-font-fallback">' if needs_cjk_fallback else "",
             f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
         ]
         prev_key = None
@@ -1216,6 +1261,8 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
             first = False
         if not first and prev_style is not None:
             body.append(_ancestors_close(prev_style))
+        if needs_cjk_fallback:
+            body.append("</div>")
 
         item.content = "".join(body)
         out.add_item(item)
