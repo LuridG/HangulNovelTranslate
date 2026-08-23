@@ -5,5 +5,6 @@ __pycache__/
 output/
 data/
 *.translation_state.json
+*.perspective_state.json
 .gui_state.json
 .gui_config.json
