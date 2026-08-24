@@ -21,6 +21,7 @@ from typing import Any, Callable
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from .glossary import Glossary
+from .llm import LLMCancelled
 from .utils import extract_json
 
 
@@ -41,6 +42,10 @@ class PerspectiveError(RuntimeError):
     """视角转换输入、模型返回或状态存档不满足安全条件。"""
 
 
+class PerspectiveCancelled(PerspectiveError):
+    """用户停止视角转换时抛出，当前批次保持待处理。"""
+
+
 @dataclass
 class PerspectiveOptions:
     narrator_name: str
@@ -50,6 +55,7 @@ class PerspectiveOptions:
     rewrite_dialogue: bool = False
     rewrite_letters: bool = False
     rewrite_inner_monologue: bool = False
+    strategy: str = "conservative"
     chunk_chars: int = 1800
     prompt_version: str = PERSPECTIVE_PROMPT_VERSION
 
@@ -57,6 +63,7 @@ class PerspectiveOptions:
         name = self.narrator_name.strip()
         pronoun = self.pronoun.strip() or "他"
         style = self.style if self.style in {"full_name", "short_name", "pronoun"} else "pronoun"
+        strategy = self.strategy if self.strategy in {"conservative", "coverage"} else "conservative"
         if not name:
             raise ValueError("叙述者/主角名称不能为空")
         if self.chunk_chars <= 0:
@@ -69,6 +76,7 @@ class PerspectiveOptions:
             rewrite_dialogue=bool(self.rewrite_dialogue),
             rewrite_letters=bool(self.rewrite_letters),
             rewrite_inner_monologue=bool(self.rewrite_inner_monologue),
+            strategy=strategy,
             chunk_chars=int(self.chunk_chars),
             prompt_version=self.prompt_version or PERSPECTIVE_PROMPT_VERSION,
         )
@@ -238,6 +246,8 @@ def _iter_content_blocks(soup: BeautifulSoup) -> list[tuple[Tag, str]]:
 
 
 def _eligible(classification: str, options: PerspectiveOptions) -> bool:
+    if options.strategy == "coverage":
+        return classification not in {"heading", "code"}
     if classification == "narration":
         return True
     if classification == "dialogue":
@@ -292,11 +302,19 @@ def build_perspective_prompt(
         if lines:
             proper_names = "\n".join(lines)
 
+    strategy_instruction = (
+        "采用策略 2（正文全覆盖）：所有非标题、非代码正文块都已送入。逐段判断哪些文字属于叙述性旁白，"
+        "只把旁白中的第一人称改成第三人称；对白、人物原话、书信、聊天、日记和引用中的说话者第一人称应保持原样。"
+        "classification 只是粗略提示，混合段落必须分别处理旁白和引号内原话。"
+        if options.strategy == "coverage"
+        else "采用策略 1（保守筛选）：输入主要是已由本地规则筛选出的叙述性旁白。"
+    )
     system = (
         "你是一名中文小说编辑，负责把第一人称叙述改写成自然、连贯的第三人称叙述。\n"
         f"叙述者/主角：{options.narrator_name}\n"
         f"主角代词：{options.pronoun}\n"
         f"称谓风格：{_style_instruction(options)}\n"
+        f"处理策略：{strategy_instruction}\n"
         "规则：\n"
         "1. 只改写叙述性旁白中的第一人称指代；保持事实、时态、语气、情节和信息量。\n"
         "2. 输入中的每个 block 与 segment 必须原样保留编号和顺序，返回数量完全一致。\n"
@@ -309,6 +327,7 @@ def build_perspective_prompt(
     payload_lines: list[str] = []
     for block in blocks:
         payload_lines.append(f"BLOCK {block.id}")
+        payload_lines.append(f"CLASSIFICATION: {block.classification}")
         for index, segment in enumerate(block.source_segments):
             payload_lines.append(f"SEGMENT {index}: {segment}")
         payload_lines.append("END BLOCK")
@@ -370,11 +389,16 @@ def rewrite_blocks(
     options: PerspectiveOptions,
     glossary: Glossary | None,
     blocks: list[PerspectiveBlock],
+    *,
+    cancel_event: Any = None,
 ) -> dict[str, list[str]]:
     if not blocks:
         return {}
     messages = build_perspective_prompt(options, glossary, blocks)
-    raw = llm.chat(messages, temperature=0.2, json_mode=True)
+    chat_kwargs = {"temperature": 0.2, "json_mode": True}
+    if cancel_event is not None:
+        chat_kwargs["cancel_event"] = cancel_event
+    raw = llm.chat(messages, **chat_kwargs)
     try:
         payload = extract_json(raw)
     except Exception as exc:  # noqa: BLE001
@@ -574,6 +598,29 @@ def load_failed_perspective_blocks(state_path: str | Path) -> list[PerspectiveFa
     return result
 
 
+def load_perspective_state(state_path: str | Path) -> dict[str, Any]:
+    """读取并校验视角转换存档，供 GUI 直接恢复一次作业。"""
+    path = Path(state_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("视角转换存档必须是 JSON 对象")
+    if data.get("mode") != "first_to_third":
+        raise ValueError("这不是第一人称改第三人称存档")
+    if not str(data.get("source_path", "")).strip():
+        raise ValueError("视角转换存档缺少输入 EPUB 路径")
+    if not str(data.get("output_path", "")).strip():
+        raise ValueError("视角转换存档缺少输出 EPUB 路径")
+    options = data.get("options")
+    if not isinstance(options, dict):
+        raise ValueError("视角转换存档缺少 options")
+    normalized_options = PerspectiveOptions(**options).normalized()
+    data["options"] = _state_options(normalized_options)
+    blocks = data.get("blocks")
+    if not isinstance(blocks, dict):
+        raise ValueError("视角转换存档缺少 blocks")
+    return data
+
+
 def save_manual_perspective_translation(
     state_path: str | Path,
     block_id: str,
@@ -595,6 +642,31 @@ def save_manual_perspective_translation(
     ]
     item["status"] = "completed"
     item["error"] = ""
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    statuses = [
+        value.get("status")
+        for value in (data.get("blocks") or {}).values()
+        if isinstance(value, dict)
+    ]
+    return {
+        "completed": sum(status == "completed" for status in statuses),
+        "failed": sum(status == "failed" for status in statuses),
+    }
+
+
+def save_perspective_failure(
+    state_path: str | Path,
+    block_id: str,
+    error: str,
+) -> dict[str, int]:
+    """更新一次失败重试的错误原因，并保留该块的 failed 状态。"""
+    path = Path(state_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    item = (data.get("blocks") or {}).get(block_id)
+    if not isinstance(item, dict):
+        raise ValueError(f"找不到视角转换块：{block_id}")
+    item["status"] = "failed"
+    item["error"] = str(error)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     statuses = [
         value.get("status")
@@ -734,8 +806,13 @@ class PerspectiveConverter:
             raise ValueError("视角转换存档对应的输入 EPUB 已变化，请重置该存档后再开始。")
         if data.get("source_fingerprint") != _source_fingerprint(input_path):
             raise ValueError("输入 EPUB 已变化，为避免错写请重置视角转换存档。")
-        if data.get("options") != _state_options(self.options):
+        saved_options = data.get("options")
+        if not isinstance(saved_options, dict):
+            raise ValueError("视角转换存档缺少 options")
+        normalized_saved_options = _state_options(PerspectiveOptions(**saved_options).normalized())
+        if normalized_saved_options != _state_options(self.options):
             raise ValueError("视角转换参数已变化，请先重置存档再开始。")
+        data["options"] = normalized_saved_options
         old_blocks = data.get("blocks") or {}
         for block_id, block in blocks.items():
             old = old_blocks.get(block_id)
@@ -760,32 +837,68 @@ class PerspectiveConverter:
             if item.get("status") != "completed":
                 pending.append(block)
         batches = _batch_blocks(pending, self.options.chunk_chars)
-        total = len(pending)
-        done = sum(
+        total = len(blocks)
+        completed = sum(
             1
             for item in state["blocks"].values()
             if isinstance(item, dict) and item.get("status") == "completed"
         )
-        self.progress_callback("视角转换", done, total + done, f"待处理 {total} 块")
+        attempted_failed: set[str] = set()
+        self.progress_callback(
+            "视角转换",
+            completed,
+            total,
+            f"待处理 {total - completed} 块",
+        )
         for batch in batches:
             if self._cancelled():
-                raise PerspectiveError("视角转换已停止，已完成块已保存")
+                raise PerspectiveCancelled("视角转换已停止，已完成块已保存")
             try:
-                translated = rewrite_blocks(self.llm, self.options, self.glossary, batch)
+                translated = rewrite_blocks(
+                    self.llm,
+                    self.options,
+                    self.glossary,
+                    batch,
+                    cancel_event=self.cancel_event,
+                )
+                if self._cancelled():
+                    raise PerspectiveCancelled("视角转换已停止，已完成块已保存")
                 for block in batch:
                     item = state["blocks"][block.id]
                     item["translated_segments"] = translated[block.id]
                     item["status"] = "completed"
                     item["error"] = ""
-                    done += 1
+            except LLMCancelled as exc:
+                self._save_state(state_path, state)
+                raise PerspectiveCancelled("视角转换已停止，已完成块已保存") from exc
+            except PerspectiveCancelled:
+                self._save_state(state_path, state)
+                raise
             except Exception as exc:  # noqa: BLE001
                 error = str(exc)
                 for block in batch:
                     item = state["blocks"][block.id]
                     item["status"] = "failed"
                     item["error"] = error
+                    attempted_failed.add(block.id)
+            completed = sum(
+                1
+                for item in state["blocks"].values()
+                if isinstance(item, dict) and item.get("status") == "completed"
+            )
+            failed = sum(
+                1
+                for item in state["blocks"].values()
+                if isinstance(item, dict) and item.get("status") == "failed"
+            )
+            processed = completed + len(attempted_failed)
             self._save_state(state_path, state)
-            self.progress_callback("视角转换", done, total + done, f"已完成 {done}/{total + done} 块")
+            self.progress_callback(
+                "视角转换",
+                processed,
+                total,
+                f"成功 {completed} 块，失败 {failed} 块，待处理 {max(total - processed, 0)} 块",
+            )
 
     def _render(self, input_path: Path, output_path: Path, state: dict[str, Any]) -> dict[str, int]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -852,6 +965,7 @@ class PerspectiveConverter:
         output_path: str | Path,
         *,
         resume: bool = True,
+        state_path: str | Path | None = None,
     ) -> dict[str, Any]:
         input_path = Path(input_path)
         output_path = Path(output_path)
@@ -859,13 +973,17 @@ class PerspectiveConverter:
             raise FileNotFoundError(f"输入 EPUB 不存在：{input_path}")
         if input_path.resolve() == output_path.resolve():
             raise ValueError("输出 EPUB 不能覆盖输入 EPUB")
-        state_path = perspective_state_path(input_path, output_path)
+        state_file = Path(state_path) if state_path is not None else perspective_state_path(input_path, output_path)
         with zipfile.ZipFile(input_path, "r") as archive:
             blocks = self._scan_archive(archive, self.options)
-        state = self._load_or_create_state(state_path, input_path, output_path, blocks, resume=resume)
-        self._translate_pending(state_path, state, blocks)
+        state = self._load_or_create_state(state_file, input_path, output_path, blocks, resume=resume)
+        cancelled = False
+        try:
+            self._translate_pending(state_file, state, blocks)
+        except PerspectiveCancelled:
+            cancelled = True
         stats = self._render(input_path, output_path, state)
-        self._save_state(state_path, state)
+        self._save_state(state_file, state)
         failed = sum(
             1 for item in state["blocks"].values()
             if isinstance(item, dict) and item.get("status") == "failed"
@@ -876,7 +994,8 @@ class PerspectiveConverter:
         )
         return {
             **stats,
-            "state_path": state_path,
+            "cancelled": cancelled,
+            "state_path": state_file,
             "output_path": output_path,
             "total_blocks": len(blocks),
             "completed_blocks": completed,
@@ -908,8 +1027,12 @@ def render_perspective_state(
     return converter.render_state(input_path, output_path, state_path)
 
 
-def reset_perspective_state(input_path: str | Path, output_path: str | Path) -> Path:
-    path = perspective_state_path(input_path, output_path)
+def reset_perspective_state(
+    input_path: str | Path,
+    output_path: str | Path,
+    state_path: str | Path | None = None,
+) -> Path:
+    path = Path(state_path) if state_path is not None else perspective_state_path(input_path, output_path)
     if path.exists():
         path.unlink()
     return path

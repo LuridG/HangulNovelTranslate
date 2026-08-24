@@ -9,6 +9,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import unicodedata
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -32,9 +33,11 @@ from .perspective import (
     PerspectiveOptions,
     inspect_perspective_epub,
     load_failed_perspective_blocks,
+    load_perspective_state,
     perspective_state_path,
     reset_perspective_state,
     rewrite_blocks,
+    save_perspective_failure,
     save_manual_perspective_translation,
 )
 from .translator import (
@@ -75,8 +78,9 @@ def _save_ui_state(state: dict[str, Any]) -> None:
 class TreeviewTooltip:
     """悬停浮窗：当 Treeview 单元格文本较长时，鼠标悬停展示完整内容/路径。"""
 
-    def __init__(self, tree: ttk.Treeview):
+    def __init__(self, tree: ttk.Treeview, text_provider=None):
         self.tree = tree
+        self.text_provider = text_provider
         self.tip_window: tk.Toplevel | None = None
         self.last_item: str | None = None
         self.last_col: str | None = None
@@ -99,14 +103,18 @@ class TreeviewTooltip:
             if not values or col_idx >= len(values):
                 self._hide()
                 return
-            text = str(values[col_idx]).strip()
+            if self.text_provider is not None:
+                provided = self.text_provider(item, col_idx)
+                text = str(provided).strip() if provided is not None else ""
+            else:
+                text = str(values[col_idx]).strip()
         except Exception:
             self._hide()
             return
         if not text:
             self._hide()
             return
-        if len(text) > 16 or "\\" in text or "/" in text or "\n" in text:
+        if self.text_provider is not None or len(text) > 16 or "\\" in text or "/" in text or "\n" in text:
             self._show(event.x_root + 15, event.y_root + 15, text)
         else:
             self._hide()
@@ -789,10 +797,13 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         self.items: list[PerspectiveFailedBlock] = []
         self.current: PerspectiveFailedBlock | None = None
         self._busy = False
+        self._batch_active = False
+        self._batch_cancel_event = threading.Event()
 
         self.title("视角转换失败块")
         self.geometry("1000x680")
         self.minsize(860, 580)
+        self.protocol("WM_DELETE_WINDOW", self._close_dialog)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(2, weight=1)
 
@@ -874,20 +885,51 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
 
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
-        ctk.CTkButton(
+        self.save_btn = ctk.CTkButton(
             buttons,
             text="💾 保存当前块",
             width=130,
             fg_color=THEME["primary"],
             hover_color=THEME["primary_hover"],
             command=self._save_translation,
-        ).grid(row=0, column=0, padx=4)
-        ctk.CTkButton(buttons, text="关闭", width=90, command=self.destroy).grid(row=0, column=1, padx=4)
+        )
+        self.save_btn.grid(row=0, column=0, padx=4)
+        self.batch_btn = ctk.CTkButton(
+            buttons,
+            text="▶ 批量重试失败块",
+            width=145,
+            fg_color=THEME["primary"],
+            hover_color=THEME["primary_hover"],
+            command=self._batch_retry_failed,
+        )
+        self.batch_btn.grid(row=0, column=1, padx=4)
+        self.batch_stop_btn = ctk.CTkButton(
+            buttons,
+            text="⏹ 停止批量",
+            width=100,
+            fg_color=THEME["danger"],
+            hover_color=THEME["danger_hover"],
+            command=self._stop_batch_retry,
+        )
+        self.batch_stop_btn.grid(row=0, column=2, padx=4)
+        self.batch_stop_btn.configure(state="disabled")
+        self.close_btn = ctk.CTkButton(buttons, text="关闭", width=90, command=self._close_dialog)
+        self.close_btn.grid(row=0, column=3, padx=4)
+        self.batch_progress = ctk.CTkProgressBar(
+            buttons,
+            width=150,
+            height=8,
+            progress_color=THEME["primary"],
+        )
+        self.batch_progress.set(0)
+        self.batch_progress.grid(row=0, column=4, padx=(16, 6))
+        self.batch_status_var = tk.StringVar(value="")
         ctk.CTkLabel(
             buttons,
-            text="保存只写入视角转换存档；回到主界面点“开始转换”才会重新生成 EPUB。",
+            textvariable=self.batch_status_var,
             text_color=THEME["text_muted"],
-        ).grid(row=0, column=2, padx=16, sticky="w")
+            anchor="w",
+        ).grid(row=0, column=5, padx=4, sticky="w")
 
         self._load_items()
 
@@ -930,7 +972,7 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         elif not self.status_var.get():
             self.status_var.set("当前没有失败块")
 
-    def _refresh_tree(self):
+    def _refresh_tree(self, selected_block_id: str | None = None):
         for item in self.tree.get_children():
             self.tree.delete(item)
         for index, item in enumerate(self.items):
@@ -940,6 +982,13 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
                 iid=str(index),
                 values=(item.block_id, Path(item.file).name, item.classification, item.error[:80]),
             )
+        if selected_block_id:
+            for index, item in enumerate(self.items):
+                if item.block_id == selected_block_id:
+                    iid = str(index)
+                    self.tree.selection_set(iid)
+                    self.tree.see(iid)
+                    break
 
     def _on_select(self, _event=None):
         selection = self.tree.selection()
@@ -972,6 +1021,8 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
             return
         self._busy = True
         self.translate_btn.configure(state="disabled")
+        self.batch_btn.configure(state="disabled")
+        self.save_btn.configure(state="disabled")
         self.status_var.set("正在用所选模型改写…")
         threading.Thread(
             target=self._translate_worker,
@@ -997,9 +1048,218 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         except Exception as exc:  # noqa: BLE001
             self.after(0, lambda: self._on_model_error(str(exc)))
 
+    def _batch_retry_failed(self):
+        if self._busy:
+            return
+        try:
+            items = load_failed_perspective_blocks(self.state_path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("读取失败块失败", str(exc), parent=self)
+            return
+        if not items:
+            self.items = []
+            self._refresh_tree()
+            self.batch_progress.set(1)
+            self.batch_status_var.set("没有待重试的失败块")
+            self.status_var.set("当前没有失败块")
+            return
+
+        base_url = self.base_url_var.get().strip()
+        api_key = self.api_key_var.get().strip()
+        model = self.model_var.get().strip()
+        if not base_url or not model:
+            messagebox.showwarning("提示", "Base URL 和 Model 不能为空", parent=self)
+            return
+
+        self.items = items
+        self._refresh_tree(self.current.block_id if self.current else None)
+        self._busy = True
+        self._batch_active = True
+        self._batch_cancel_event.clear()
+        self.translate_btn.configure(state="disabled")
+        self.batch_btn.configure(state="disabled")
+        self.batch_stop_btn.configure(state="normal")
+        self.save_btn.configure(state="disabled")
+        self.close_btn.configure(state="disabled")
+        self.batch_progress.set(0)
+        self.batch_status_var.set(f"批量重试：0/{len(items)}")
+        self.status_var.set(f"批量重试失败块：0/{len(items)}")
+        threading.Thread(
+            target=self._batch_retry_worker,
+            args=(items, base_url, api_key, model),
+            daemon=True,
+        ).start()
+
+    def _batch_retry_worker(
+        self,
+        items: list[PerspectiveFailedBlock],
+        base_url: str,
+        api_key: str,
+        model: str,
+    ):
+        completed = 0
+        failed = 0
+        processed = 0
+        cancelled = False
+        try:
+            data = self.config.to_dict()
+            data.update({"base_url": base_url, "api_key": api_key, "model": model})
+            llm = LLMClient(AppConfig.from_dict(data))
+            for item in items:
+                if self._batch_cancel_event.is_set():
+                    cancelled = True
+                    break
+                block = PerspectiveBlock(
+                    id=item.block_id,
+                    file=item.file,
+                    index=0,
+                    source_segments=item.source_segments,
+                    source_text="".join(item.source_segments),
+                    classification=item.classification,
+                )
+                try:
+                    translated = rewrite_blocks(
+                        llm,
+                        self.options,
+                        self.glossary,
+                        [block],
+                        cancel_event=self._batch_cancel_event,
+                    )[item.block_id]
+                    if self._batch_cancel_event.is_set():
+                        cancelled = True
+                        break
+                    save_manual_perspective_translation(
+                        self.state_path,
+                        item.block_id,
+                        translated,
+                    )
+                    completed += 1
+                    success = True
+                    error = ""
+                except Exception as exc:  # noqa: BLE001
+                    if self._batch_cancel_event.is_set():
+                        cancelled = True
+                        break
+                    error = str(exc)
+                    save_perspective_failure(self.state_path, item.block_id, error)
+                    failed += 1
+                    success = False
+                processed += 1
+                self.after(
+                    0,
+                    lambda block_id=item.block_id, ok=success, message=error, current=processed, total=len(items), good=completed, bad=failed: self._on_batch_item_done(
+                        block_id, ok, message, current, total, good, bad
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._batch_active = False
+            self.after(0, lambda: self._on_batch_worker_error(str(exc)))
+            return
+        self.after(
+            0,
+            lambda: self._on_batch_finished(
+                processed,
+                len(items),
+                completed,
+                failed,
+                cancelled or self._batch_cancel_event.is_set(),
+            ),
+        )
+
+    def _on_batch_item_done(
+        self,
+        block_id: str,
+        success: bool,
+        error: str,
+        processed: int,
+        total: int,
+        completed: int,
+        failed: int,
+    ):
+        if success:
+            selected_id = self.current.block_id if self.current else None
+            self.items = [item for item in self.items if item.block_id != block_id]
+            if selected_id == block_id:
+                self.current = None
+                self._clear_editor()
+            self._refresh_tree(selected_id if selected_id != block_id else None)
+        elif error:
+            for item in self.items:
+                if item.block_id == block_id:
+                    item.error = error
+                    break
+            self._refresh_tree(self.current.block_id if self.current else None)
+        self.batch_progress.set((processed / total) if total else 1)
+        self.batch_status_var.set(f"批量重试：{processed}/{total}，成功 {completed}，失败 {failed}")
+        self.status_var.set(self.batch_status_var.get())
+        if not success and error:
+            self.error_label.configure(text=f"最近失败块：{block_id}    原因：{error}")
+
+    def _on_batch_finished(
+        self,
+        processed: int,
+        total: int,
+        completed: int,
+        failed: int,
+        cancelled: bool,
+    ):
+        self._busy = False
+        self._batch_active = False
+        self.translate_btn.configure(state="normal")
+        self.batch_btn.configure(state="normal")
+        self.batch_stop_btn.configure(state="disabled")
+        self.save_btn.configure(state="normal")
+        self.close_btn.configure(state="normal")
+        self.batch_progress.set((processed / total) if total else 1)
+        if cancelled:
+            status = f"批量已停止：处理 {processed}/{total}，成功 {completed}，失败 {failed}"
+        else:
+            status = f"批量完成：成功 {completed}，失败 {failed}"
+        self.batch_status_var.set(status)
+        self._load_items()
+        self.status_var.set(status)
+
+    def _on_batch_worker_error(self, message: str):
+        self._busy = False
+        self._batch_active = False
+        self.translate_btn.configure(state="normal")
+        self.batch_btn.configure(state="normal")
+        self.batch_stop_btn.configure(state="disabled")
+        self.save_btn.configure(state="normal")
+        self.close_btn.configure(state="normal")
+        self._load_items()
+        self.status_var.set("批量重试出错")
+        messagebox.showerror("批量重试出错", message, parent=self)
+
+    def _stop_batch_retry(self):
+        if self._batch_active:
+            self._batch_cancel_event.set()
+            self.batch_stop_btn.configure(state="disabled")
+            self.batch_status_var.set("正在停止批量…")
+
+    def _close_dialog(self):
+        if not self._busy:
+            self.destroy()
+            return
+        if self._batch_active and self._batch_cancel_event.is_set():
+            return
+        if self._batch_active:
+            messagebox.showinfo("提示", "当前仍有批量模型请求，先点击“停止批量”并等待当前块结束。", parent=self)
+        else:
+            messagebox.showinfo("提示", "当前仍有模型请求，请等待当前块完成后再关闭窗口。", parent=self)
+
+    def _clear_editor(self):
+        self.source_box.configure(state="normal")
+        self.source_box.delete("1.0", "end")
+        self.source_box.configure(state="disabled")
+        self.output_box.delete("1.0", "end")
+        self.error_label.configure(text="")
+
     def _on_model_done(self, translated: list[str]):
         self._busy = False
         self.translate_btn.configure(state="normal")
+        self.batch_btn.configure(state="normal")
+        self.save_btn.configure(state="normal")
         self.output_box.delete("1.0", "end")
         self.output_box.insert("end", self._format_segments(translated))
         self.status_var.set("模型改写完成，请人工核对后保存")
@@ -1007,6 +1267,8 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
     def _on_model_error(self, message: str):
         self._busy = False
         self.translate_btn.configure(state="normal")
+        self.batch_btn.configure(state="normal")
+        self.save_btn.configure(state="normal")
         self.status_var.set("模型改写失败")
         messagebox.showerror("改写失败", message, parent=self)
 
@@ -1163,14 +1425,12 @@ class App(ctk.CTk):
         self.input_tree.heading("order", text="序")
         self.input_tree.heading("file", text="文件")
         self.input_tree.column("order", width=40, minwidth=30, anchor="center")
-        self.input_tree.column("file", width=450, minwidth=280, anchor="w", stretch=False)
+        self.input_tree.column("file", width=450, minwidth=280, anchor="w", stretch=True)
         self.input_tree.grid(row=0, column=0, sticky="nsew")
         input_scroll = ctk.CTkScrollbar(list_frame, command=self.input_tree.yview)
         input_scroll.grid(row=0, column=1, sticky="ns")
-        input_xscroll = ctk.CTkScrollbar(list_frame, orientation="horizontal", command=self.input_tree.xview)
-        input_xscroll.grid(row=1, column=0, sticky="ew")
-        self.input_tree.configure(yscrollcommand=input_scroll.set, xscrollcommand=input_xscroll.set)
-        TreeviewTooltip(self.input_tree)
+        self.input_tree.configure(yscrollcommand=input_scroll.set)
+        TreeviewTooltip(self.input_tree, self._input_tree_tooltip)
 
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.grid(row=row + 2, column=0, columnspan=2, padx=10, pady=4, sticky="ew")
@@ -1710,13 +1970,28 @@ class App(ctk.CTk):
         ctk.CTkLabel(options, text="每批字符数").grid(row=2, column=0, padx=(8, 6), pady=6, sticky="w")
         self.perspective_chunk_var = tk.StringVar(value=str(self.app_config.chunk_chars))
         ctk.CTkEntry(options, textvariable=self.perspective_chunk_var, width=110).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        ctk.CTkLabel(options, text="转换策略").grid(row=2, column=2, padx=(12, 6), pady=6, sticky="w")
+        self.perspective_strategy_var = tk.StringVar(value="策略 1：保守筛选")
+        self.perspective_strategy_control = ctk.CTkSegmentedButton(
+            options,
+            variable=self.perspective_strategy_var,
+            values=["策略 1：保守筛选", "策略 2：正文全覆盖"],
+            command=self._perspective_strategy_changed,
+        )
+        self.perspective_strategy_control.grid(row=2, column=3, padx=6, pady=6, sticky="ew")
 
         self.perspective_dialogue_var = tk.BooleanVar(value=False)
         self.perspective_letters_var = tk.BooleanVar(value=False)
         self.perspective_inner_var = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(options, text="改写含对白段落", variable=self.perspective_dialogue_var).grid(row=2, column=2, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkCheckBox(options, text="改写书信/聊天/引用", variable=self.perspective_letters_var).grid(row=3, column=0, columnspan=2, padx=8, pady=6, sticky="w")
-        ctk.CTkCheckBox(options, text="改写内心独白", variable=self.perspective_inner_var).grid(row=3, column=2, columnspan=2, padx=12, pady=6, sticky="w")
+        self.perspective_dialogue_check = ctk.CTkCheckBox(options, text="改写含对白段落", variable=self.perspective_dialogue_var)
+        self.perspective_dialogue_check.grid(row=3, column=0, padx=8, pady=6, sticky="w")
+        self.perspective_letters_check = ctk.CTkCheckBox(options, text="改写书信/聊天/引用", variable=self.perspective_letters_var)
+        self.perspective_letters_check.grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        self.perspective_inner_check = ctk.CTkCheckBox(options, text="改写内心独白", variable=self.perspective_inner_var)
+        self.perspective_inner_check.grid(row=3, column=2, padx=12, pady=6, sticky="w")
+        self.perspective_strategy_note = ctk.CTkLabel(options, text="", text_color=THEME["text_muted"], anchor="w")
+        self.perspective_strategy_note.grid(row=4, column=0, columnspan=4, padx=8, pady=(0, 6), sticky="w")
+        self._perspective_strategy_changed(self.perspective_strategy_var.get())
 
         glossary_frame = ctk.CTkFrame(parent, fg_color="transparent")
         glossary_frame.grid(row=4, column=0, padx=12, pady=(0, 6), sticky="ew")
@@ -1727,14 +2002,16 @@ class App(ctk.CTk):
         ctk.CTkButton(glossary_frame, text="📂 加载词表", width=100, command=self._perspective_load_glossary).grid(row=0, column=2, padx=4)
         ctk.CTkButton(glossary_frame, text="清除外部词表", width=100, command=self._perspective_clear_external_glossary).grid(row=0, column=3, padx=4)
         self.perspective_external_glossary: Glossary | None = None
+        self.perspective_state_override: Path | None = None
 
         action_frame = ctk.CTkFrame(parent, fg_color="transparent")
         action_frame.grid(row=5, column=0, padx=12, pady=(0, 8), sticky="ew")
         ctk.CTkButton(action_frame, text="🔍 预览范围", width=105, command=self._perspective_preview_async).grid(row=0, column=0, padx=4)
         ctk.CTkButton(action_frame, text="▶ 开始转换", width=115, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._perspective_start_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(action_frame, text="✏ 查看失败块", width=115, command=self._perspective_open_failed).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(action_frame, text="↻ 重置存档", width=105, fg_color=THEME["secondary"], hover_color=THEME["danger"], command=self._perspective_reset_state).grid(row=0, column=3, padx=4)
-        ctk.CTkLabel(action_frame, text="默认保护对白、书信、聊天、日记、引用和内心独白。", text_color=THEME["text_muted"]).grid(row=0, column=4, padx=12, sticky="w")
+        ctk.CTkButton(action_frame, text="📂 加载上次作业", width=125, command=self._perspective_load_state).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(action_frame, text="↻ 重置存档", width=105, fg_color=THEME["secondary"], hover_color=THEME["danger"], command=self._perspective_reset_state).grid(row=0, column=4, padx=4)
+        ctk.CTkLabel(action_frame, text="默认保护对白、书信、聊天、日记、引用和内心独白。", text_color=THEME["text_muted"]).grid(row=0, column=5, padx=12, sticky="w")
 
         self.perspective_preview_box = ctk.CTkTextbox(parent, height=230)
         self.perspective_preview_box.grid(row=6, column=0, padx=12, pady=(0, 12), sticky="nsew")
@@ -1742,6 +2019,7 @@ class App(ctk.CTk):
 
     def _perspective_options_from_ui(self) -> PerspectiveOptions:
         style_map = {"使用全名": "full_name", "使用简称": "short_name", "优先使用代词": "pronoun"}
+        strategy_map = {"策略 1：保守筛选": "conservative", "策略 2：正文全覆盖": "coverage"}
         try:
             chunk_chars = int(self.perspective_chunk_var.get().strip())
         except ValueError as exc:
@@ -1754,8 +2032,21 @@ class App(ctk.CTk):
             rewrite_dialogue=self.perspective_dialogue_var.get(),
             rewrite_letters=self.perspective_letters_var.get(),
             rewrite_inner_monologue=self.perspective_inner_var.get(),
+            strategy=strategy_map.get(self.perspective_strategy_var.get(), "conservative"),
             chunk_chars=chunk_chars,
         ).normalized()
+
+    def _perspective_strategy_changed(self, value: str):
+        coverage = value == "策略 2：正文全覆盖"
+        state = "disabled" if coverage else "normal"
+        for checkbox in (self.perspective_dialogue_check, self.perspective_letters_check, self.perspective_inner_check):
+            checkbox.configure(state=state)
+        note = (
+            "策略 2 会送入全部非标题、非代码正文，由模型区分旁白与人物原话。"
+            if coverage
+            else "策略 1 按本地分类筛选；可单独决定是否纳入对白、书信和内心独白。"
+        )
+        self.perspective_strategy_note.configure(text=note)
 
     def _perspective_paths_from_ui(self) -> tuple[Path, Path]:
         source_text = self.perspective_input_var.get().strip()
@@ -1782,6 +2073,7 @@ class App(ctk.CTk):
             self.perspective_input_var.set(path)
             source = Path(path)
             self.perspective_output_var.set(str(source.with_name(source.stem + ".第三人称.epub")))
+            self.perspective_state_override = None
 
     def _perspective_browse_output(self):
         path = filedialog.asksaveasfilename(
@@ -1792,6 +2084,52 @@ class App(ctk.CTk):
         )
         if path:
             self.perspective_output_var.set(path)
+            self.perspective_state_override = None
+
+    def _perspective_load_state(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行，完成后再加载存档。", parent=self)
+            return
+        path = filedialog.askopenfilename(
+            title="加载视角转换作业存档",
+            filetypes=[("视角转换 JSON", "*.perspective_state.json"), ("JSON", "*.json")],
+            parent=self,
+        )
+        if not path:
+            return
+        try:
+            state_path = Path(path)
+            data = load_perspective_state(state_path)
+            source = Path(str(data["source_path"]))
+            output = Path(str(data["output_path"]))
+            options = PerspectiveOptions(**data["options"]).normalized()
+            if not source.exists():
+                raise ValueError(f"存档对应的输入 EPUB 不存在：{source}")
+            if source.suffix.lower() != ".epub":
+                raise ValueError("存档对应的输入文件不是 EPUB")
+            style_labels = {"full_name": "使用全名", "short_name": "使用简称", "pronoun": "优先使用代词"}
+            self.perspective_input_var.set(str(source))
+            self.perspective_output_var.set(str(output))
+            self.perspective_name_var.set(options.narrator_name)
+            self.perspective_short_name_var.set(options.short_name)
+            self.perspective_pronoun_var.set(options.pronoun)
+            self.perspective_style_var.set(style_labels.get(options.style, "优先使用代词"))
+            self.perspective_chunk_var.set(str(options.chunk_chars))
+            self.perspective_dialogue_var.set(options.rewrite_dialogue)
+            self.perspective_letters_var.set(options.rewrite_letters)
+            self.perspective_inner_var.set(options.rewrite_inner_monologue)
+            strategy_label = "策略 2：正文全覆盖" if options.strategy == "coverage" else "策略 1：保守筛选"
+            self.perspective_strategy_var.set(strategy_label)
+            self._perspective_strategy_changed(strategy_label)
+            self.perspective_state_override = state_path
+            blocks = data.get("blocks") or {}
+            completed = sum(isinstance(item, dict) and item.get("status") == "completed" for item in blocks.values())
+            failed = sum(isinstance(item, dict) and item.get("status") == "failed" for item in blocks.values())
+            pending = len(blocks) - completed - failed
+            self.status_var.set(f"已加载视角转换作业：完成 {completed}，失败 {failed}，待处理 {max(pending, 0)}")
+            self.log(f"已加载视角转换作业存档：{state_path}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("加载存档失败", str(exc), parent=self)
 
     def _perspective_load_glossary(self):
         path = filedialog.askopenfilename(title="加载视角转换词表", filetypes=[("JSON", "*.json")], parent=self)
@@ -1888,13 +2226,28 @@ class App(ctk.CTk):
                     lambda: self._set_progress(stage, done, total, message),
                 ),
             )
-            result = converter.convert(source, output, resume=True)
+            result = converter.convert(
+                source,
+                output,
+                resume=True,
+                state_path=self.perspective_state_override,
+            )
             self.after(0, lambda: self._on_perspective_done(result))
         except Exception as exc:  # noqa: BLE001
             self.after(0, lambda: self._on_error(str(exc)))
 
     def _on_perspective_done(self, result: dict[str, Any]):
         self._set_busy(False)
+        if result.get("cancelled"):
+            total = result.get("total_blocks", 0)
+            completed = result.get("completed_blocks", 0)
+            self.progress.set((completed / total) if total else 0)
+            self.status_var.set("视角转换已停止")
+            self.log(
+                f"视角转换已停止：已完成 {completed}/{total} 块；"
+                f"已输出当前进度，剩余块可再次点击“开始转换”续传"
+            )
+            return
         self.progress.set(1)
         self.status_var.set("视角转换完成" if not result["failed_blocks"] else "视角转换完成（有失败）")
         self.log(
@@ -1918,7 +2271,7 @@ class App(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("参数错误", str(exc), parent=self)
             return
-        state_path = perspective_state_path(source, output)
+        state_path = self.perspective_state_override or perspective_state_path(source, output)
         if not state_path.exists():
             messagebox.showinfo("提示", "还没有视角转换存档，请先开始转换。", parent=self)
             return
@@ -1926,8 +2279,8 @@ class App(ctk.CTk):
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
             return
         try:
-            state_data = json.loads(state_path.read_text(encoding="utf-8"))
-            saved_options = PerspectiveOptions(**(state_data.get("options") or {})).normalized()
+            state_data = load_perspective_state(state_path)
+            saved_options = PerspectiveOptions(**state_data["options"]).normalized()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("存档无效", str(exc), parent=self)
             return
@@ -1949,13 +2302,15 @@ class App(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("参数错误", str(exc), parent=self)
             return
-        state_path = perspective_state_path(source, output)
+        state_path = self.perspective_state_override or perspective_state_path(source, output)
         if not state_path.exists():
             messagebox.showinfo("提示", "当前没有视角转换存档。", parent=self)
             return
         if not messagebox.askyesno("确认重置", "删除视角转换存档后，已完成的块也会重新调用模型。确定继续吗？", parent=self):
             return
-        reset_perspective_state(source, output)
+        reset_perspective_state(source, output, state_path)
+        if self.perspective_state_override == state_path:
+            self.perspective_state_override = None
         self.log(f"视角转换存档已重置：{state_path.name}")
         self.status_var.set("视角转换存档已重置")
 
@@ -2149,7 +2504,17 @@ class App(ctk.CTk):
         for item in self.input_tree.get_children():
             self.input_tree.delete(item)
         for index, path in enumerate(self.input_files):
-            self.input_tree.insert("", "end", iid=str(index), values=(index + 1, str(path)))
+            display_name = unicodedata.normalize("NFC", path.name)
+            self.input_tree.insert("", "end", iid=str(index), values=(index + 1, display_name))
+
+    def _input_tree_tooltip(self, item: str, column_index: int) -> str | None:
+        if column_index != 1:
+            return None
+        try:
+            path = self.input_files[int(item)]
+        except (ValueError, IndexError):
+            return None
+        return unicodedata.normalize("NFC", str(path))
 
     def _output_stem_for(self, index: int, path: Path) -> str:
         """多本输出文件名主名：填了小说名用“小说名 第X卷”，否则用源文件名（通常已含卷号）。"""
