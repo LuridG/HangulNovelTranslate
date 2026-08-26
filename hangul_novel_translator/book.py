@@ -1076,13 +1076,13 @@ def _contains_cjk_text(value: str) -> bool:
 
 
 def _needs_cjk_font_fallback(metadata: dict, chapters: list[Chapter]) -> bool:
-    """仅命中原书使用 Gulim 且译文包含中文的 EPUB。"""
+    """命中原书把正文继承到韩文字体、而译文包含中文的 EPUB。"""
     css_text = "\n".join(
         _as_text(res.get("content", b""))
         for res in metadata.get("css_resources") or []
         if str(res.get("name", "")).lower().endswith(".css")
     )
-    return bool(re.search(r"굴림|gulim", css_text, re.IGNORECASE)) and any(
+    return bool(re.search(r"굴림|gulim|바탕|batang|돋움|dotum|궁서|gungsuh|맑은 고딕|malgun", css_text, re.IGNORECASE)) and any(
         _contains_cjk_text(paragraph)
         for chapter in chapters
         for paragraph in chapter.paragraphs
@@ -1224,7 +1224,18 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     metadata = book.metadata or {}
     css_resources: list[dict] = list(metadata.get("css_resources") or [])
     doc_inline_css: dict[str, list[str]] = metadata.get("doc_inline_css") or {}
-    # 保留原书 CSS 的字体、字重和局部样式；中文缺字交给阅读器正常 fallback。
+    needs_cjk_fallback = _needs_cjk_font_fallback(metadata, book.chapters)
+    fallback_css_name = "Styles/zh_font_fallback.css"
+    if needs_cjk_fallback:
+        # 只改 body 的继承字体。原书对 p/class/行内标签显式声明的字体仍有更高的
+        # 规则优先级或保持原样，字号、行距、缩进、对齐和其他 CSS 不受影响。
+        css_resources.append({
+            "name": fallback_css_name,
+            "content": (
+                'body { font-family: "Microsoft YaHei", "Noto Sans CJK SC", '
+                '"Noto Sans SC", sans-serif; }'
+            ).encode("utf-8"),
+        })
 
     css_names = {
         str(res["name"])
@@ -1259,6 +1270,8 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                     "content": ("\n".join(inline_styles)).encode("utf-8"),
                 }
             )
+        if needs_cjk_fallback:
+            item.add_link(href=_relative_epub_href(file_name, fallback_css_name), rel="stylesheet", type="text/css")
         body = [
             f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
         ]
