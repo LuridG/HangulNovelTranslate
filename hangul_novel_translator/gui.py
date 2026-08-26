@@ -24,7 +24,7 @@ from .book import load_book
 from .config import AppConfig
 from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
-from .llm import LLMClient
+from .llm import LLMCancelled, LLMClient
 from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
 from .perspective import (
     PerspectiveBlock,
@@ -725,7 +725,8 @@ class FailedChunkEditorDialog(ctk.CTkToplevel):
             paras = [self.glossary.apply_replacements(p) if self.glossary else p for p in paras]
             self.after(0, lambda: self._on_translate_done(paras))
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_translate_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_translate_error(message))
 
     def _on_translate_done(self, paras: list[str]):
         self._busy = False
@@ -797,8 +798,10 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         self.items: list[PerspectiveFailedBlock] = []
         self.current: PerspectiveFailedBlock | None = None
         self._busy = False
+        self._single_cancel_event = threading.Event()
         self._batch_active = False
         self._batch_cancel_event = threading.Event()
+        self._close_requested = False
 
         self.title("视角转换失败块")
         self.geometry("1000x680")
@@ -835,6 +838,16 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
             command=self._translate_with_model,
         )
         self.translate_btn.grid(row=0, column=6, padx=(12, 4))
+        self.single_stop_btn = ctk.CTkButton(
+            cfg,
+            text="⏹ 停止当前",
+            width=100,
+            fg_color=THEME["danger"],
+            hover_color=THEME["danger_hover"],
+            command=self._stop_single_retry,
+        )
+        self.single_stop_btn.grid(row=0, column=7, padx=4)
+        self.single_stop_btn.configure(state="disabled")
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="nsew")
@@ -1020,7 +1033,10 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
             messagebox.showwarning("提示", "Base URL 和 Model 不能为空", parent=self)
             return
         self._busy = True
+        self._close_requested = False
+        self._single_cancel_event.clear()
         self.translate_btn.configure(state="disabled")
+        self.single_stop_btn.configure(state="normal")
         self.batch_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
         self.status_var.set("正在用所选模型改写…")
@@ -1043,10 +1059,29 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
                 source_text="".join(item.source_segments),
                 classification=item.classification,
             )
-            translated = rewrite_blocks(llm, self.options, self.glossary, [block])[item.block_id]
+            translated = rewrite_blocks(
+                llm,
+                self.options,
+                self.glossary,
+                [block],
+                cancel_event=self._single_cancel_event,
+            )[item.block_id]
             self.after(0, lambda: self._on_model_done(translated))
+        except LLMCancelled:
+            self.after(0, self._on_model_cancelled)
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_model_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_model_error(message))
+
+    def _on_model_cancelled(self):
+        self._busy = False
+        self.single_stop_btn.configure(state="disabled")
+        self.translate_btn.configure(state="normal")
+        self.batch_btn.configure(state="normal")
+        self.save_btn.configure(state="normal")
+        self.status_var.set("当前块请求已停止，原失败块仍保留")
+        if self._close_requested:
+            self.destroy()
 
     def _batch_retry_failed(self):
         if self._busy:
@@ -1075,6 +1110,7 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         self._refresh_tree(self.current.block_id if self.current else None)
         self._busy = True
         self._batch_active = True
+        self._close_requested = False
         self._batch_cancel_event.clear()
         self.translate_btn.configure(state="disabled")
         self.batch_btn.configure(state="disabled")
@@ -1153,7 +1189,8 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
                 )
         except Exception as exc:  # noqa: BLE001
             self._batch_active = False
-            self.after(0, lambda: self._on_batch_worker_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_batch_worker_error(message))
             return
         self.after(
             0,
@@ -1205,7 +1242,10 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
     ):
         self._busy = False
         self._batch_active = False
+        close_requested = self._close_requested
+        self._close_requested = False
         self.translate_btn.configure(state="normal")
+        self.single_stop_btn.configure(state="disabled")
         self.batch_btn.configure(state="normal")
         self.batch_stop_btn.configure(state="disabled")
         self.save_btn.configure(state="normal")
@@ -1218,18 +1258,26 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
         self.batch_status_var.set(status)
         self._load_items()
         self.status_var.set(status)
+        if close_requested:
+            self.destroy()
 
     def _on_batch_worker_error(self, message: str):
         self._busy = False
         self._batch_active = False
+        close_requested = self._close_requested
+        self._close_requested = False
         self.translate_btn.configure(state="normal")
+        self.single_stop_btn.configure(state="disabled")
         self.batch_btn.configure(state="normal")
         self.batch_stop_btn.configure(state="disabled")
         self.save_btn.configure(state="normal")
         self.close_btn.configure(state="normal")
         self._load_items()
         self.status_var.set("批量重试出错")
-        messagebox.showerror("批量重试出错", message, parent=self)
+        if close_requested:
+            self.destroy()
+        else:
+            messagebox.showerror("批量重试出错", message, parent=self)
 
     def _stop_batch_retry(self):
         if self._batch_active:
@@ -1237,16 +1285,28 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
             self.batch_stop_btn.configure(state="disabled")
             self.batch_status_var.set("正在停止批量…")
 
+    def _stop_single_retry(self):
+        if self._busy and not self._batch_active:
+            self._single_cancel_event.set()
+            self.single_stop_btn.configure(state="disabled")
+            self.status_var.set("正在停止当前块请求…")
+
     def _close_dialog(self):
         if not self._busy:
             self.destroy()
             return
-        if self._batch_active and self._batch_cancel_event.is_set():
+        self._close_requested = True
+        if not self._batch_active:
+            self._single_cancel_event.set()
+            self.single_stop_btn.configure(state="disabled")
+            self.status_var.set("正在停止当前块请求，完成后关闭窗口…")
             return
-        if self._batch_active:
-            messagebox.showinfo("提示", "当前仍有批量模型请求，先点击“停止批量”并等待当前块结束。", parent=self)
-        else:
-            messagebox.showinfo("提示", "当前仍有模型请求，请等待当前块完成后再关闭窗口。", parent=self)
+        if self._batch_cancel_event.is_set():
+            return
+        self._batch_cancel_event.set()
+        self.batch_stop_btn.configure(state="disabled")
+        self.batch_status_var.set("正在停止批量，完成后关闭窗口…")
+        return
 
     def _clear_editor(self):
         self.source_box.configure(state="normal")
@@ -1257,20 +1317,27 @@ class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
 
     def _on_model_done(self, translated: list[str]):
         self._busy = False
+        self.single_stop_btn.configure(state="disabled")
         self.translate_btn.configure(state="normal")
         self.batch_btn.configure(state="normal")
         self.save_btn.configure(state="normal")
         self.output_box.delete("1.0", "end")
         self.output_box.insert("end", self._format_segments(translated))
         self.status_var.set("模型改写完成，请人工核对后保存")
+        if self._close_requested:
+            self.destroy()
 
     def _on_model_error(self, message: str):
         self._busy = False
+        self.single_stop_btn.configure(state="disabled")
         self.translate_btn.configure(state="normal")
         self.batch_btn.configure(state="normal")
         self.save_btn.configure(state="normal")
         self.status_var.set("模型改写失败")
-        messagebox.showerror("改写失败", message, parent=self)
+        if self._close_requested:
+            self.destroy()
+        else:
+            messagebox.showerror("改写失败", message, parent=self)
 
     def _save_translation(self):
         item = self.current
@@ -2171,7 +2238,8 @@ class App(ctk.CTk):
             result = inspect_perspective_epub(source, options)
             self.after(0, lambda: self._on_perspective_preview_done(result))
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
 
     def _on_perspective_preview_done(self, result: dict[str, Any]):
         self._set_busy(False)
@@ -2234,7 +2302,8 @@ class App(ctk.CTk):
             )
             self.after(0, lambda: self._on_perspective_done(result))
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
 
     def _on_perspective_done(self, result: dict[str, Any]):
         self._set_busy(False)
@@ -2390,7 +2459,8 @@ class App(ctk.CTk):
             result = preview_finished_epub(epub, self.glossary)
             self.after(0, lambda: self._on_fixer_preview_done(result))
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
 
     def _on_fixer_preview_done(self, result):
         self._fixer_set_busy(False)
@@ -2444,7 +2514,8 @@ class App(ctk.CTk):
             result = fix_finished_epub_in_place(src, self.glossary, output)
             self.after(0, lambda: self._on_fixer_run_done(result, output, mode))
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._on_error(str(exc)))
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
 
     def _on_fixer_run_done(self, result, output, mode):
         self._fixer_set_busy(False)
