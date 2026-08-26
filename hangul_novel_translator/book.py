@@ -814,7 +814,36 @@ def metadata_from_dict(data: dict | None) -> dict:
     return result
 
 
-def parse_epub(path: Path) -> Book:
+def _is_standalone_image_container(node) -> bool:
+    """判断容器是否是未被块级标签覆盖的图片叶节点。"""
+    if getattr(node, "name", None) not in ("span", "div", "figure", "section", "aside"):
+        return False
+    if not node.find("img"):
+        return False
+    block_names = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "td", "th", "dt", "dd", "pre", "figcaption"}
+    return not any(getattr(child, "name", None) in block_names for child in node.find_all())
+
+
+def _standalone_image_blocks(soup, existing_blocks: list) -> list:
+    """找出未被块级标签覆盖的独立图片容器，并按原文顺序返回。"""
+    existing = {id(node) for node in existing_blocks}
+    candidates = []
+    for image in soup.find_all("img"):
+        parent = image.parent
+        while parent is not None and getattr(parent, "name", None) not in ("body", "html", "[document]"):
+            if getattr(parent, "name", None) in ("p", "li", "blockquote", "td", "th", "figcaption"):
+                break
+            if _is_standalone_image_container(parent):
+                if id(parent) not in existing:
+                    candidates.append(parent)
+                break
+            parent = getattr(parent, "parent", None)
+    unique = {id(node): node for node in candidates}
+    order = {id(node): index for index, node in enumerate(soup.find_all())}
+    return sorted(unique.values(), key=lambda node: order.get(id(node), 0))
+
+
+def parse_epub(path: Path, *, include_standalone_images: bool = True) -> Book:
     try:
         from bs4 import BeautifulSoup
         from ebooklib import epub
@@ -913,6 +942,10 @@ def parse_epub(path: Path) -> Book:
             if any(getattr(parent, "name", None) in ("blockquote", "li") for parent in node.parents):
                 continue
             blocks.append(node)
+        if include_standalone_images:
+            blocks.extend(_standalone_image_blocks(soup, blocks))
+            order = {id(node): position for position, node in enumerate(soup.find_all())}
+            blocks.sort(key=lambda node: order.get(id(node), 0))
         paragraphs: list[str] = []
         styles: list[ParagraphStyle | None] = []
         seen: set[str] = set()

@@ -25,7 +25,7 @@ from .config import AppConfig
 from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMCancelled, LLMClient
-from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix
+from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state
 from .perspective import (
     PerspectiveBlock,
     PerspectiveConverter,
@@ -1907,6 +1907,7 @@ class App(ctk.CTk):
         ctk.CTkButton(run_frame, text="修正并输出", width=130, command=self._merge_run_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(run_frame, text="✏ 失败块查看", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._open_failed_editor).grid(row=0, column=2, padx=4)
         ctk.CTkButton(run_frame, text="🔄 校验并重试", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_retry_async).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(run_frame, text="🖼 图片补集", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_repair_images_async).grid(row=0, column=4, padx=4)
 
         ctk.CTkLabel(
             parent,
@@ -3167,6 +3168,46 @@ class App(ctk.CTk):
             return
         dialog = FailedChunkEditorDialog(self, files, config, self.glossary)
         self.wait_window(dialog)
+
+    def _merge_repair_images_async(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        selection = self.merge_tree.selection()
+        files = [self.merge_files[int(iid)] for iid in selection] if selection else list(self.merge_files)
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("图片补集中…")
+        self.log(f"开始图片补集：检测 {len(files)} 个翻译存档与原 EPUB")
+        self.worker = threading.Thread(target=self._merge_repair_images_worker, args=(files,), daemon=True)
+        self.worker.start()
+
+    def _merge_repair_images_worker(self, files: list[Path]):
+        try:
+            config = self._config_from_ui()
+            stats = []
+            for path in files:
+                if self.cancel_event.is_set():
+                    break
+                stats.append(repair_image_state(path, config))
+            self.after(0, lambda: self._on_merge_repair_images_done(stats, self.cancel_event.is_set()))
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_merge_repair_images_done(self, stats: list[dict], stopped: bool):
+        self._set_busy(False)
+        self.progress.set(1)
+        self.status_var.set("图片补集已停止" if stopped else "图片补集完成")
+        self._refresh_merge_tree()
+        added = sum(int(item.get("added", 0)) for item in stats)
+        for item in stats:
+            self.log(f"图片补集：{item['path'].name} 新增 {item.get('added', 0)} 个图片位置")
+        messagebox.showinfo("图片补集完成", f"共补回 {added} 个图片位置。\n现在可点击“修正并输出”重新生成 EPUB。", parent=self)
 
     def _merge_preview_async(self):
         if not self.merge_files:

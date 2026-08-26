@@ -20,6 +20,8 @@ from .book import (
     export_epub,
     load_book,
     metadata_from_dict,
+    metadata_to_dict,
+    parse_epub,
 )
 from .config import AppConfig
 from .glossary import Glossary
@@ -131,6 +133,96 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
             source_path=book.source_path,
             metadata=book.metadata,
         )
+
+
+def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
+    """为旧存档补回解析阶段遗漏的独立图片，不调用模型。
+
+    旧解析结果用于保持原有译文与 chunk 映射，新解析结果只提供新增图片段落；
+    CSS、字体及图片二进制资源仍来自原书和存档 metadata。
+    """
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    old_book = parse_epub(source, include_standalone_images=False)
+    new_book = parse_epub(source, include_standalone_images=True)
+    old_cfg = _chunk_config(data, config)
+    old_chunks = build_chunks(old_book, old_cfg)
+    new_chunks = build_chunks(new_book, old_cfg)
+    completed = data.get("completed") or {}
+    if not isinstance(completed, dict):
+        completed = {}
+    old_by_chapter: dict[int, list[Any]] = {}
+    for chunk in old_chunks:
+        old_by_chapter.setdefault(chunk.chapter_index, []).append(chunk)
+    translated_by_chapter: dict[int, list[str]] = {}
+    completed_by_chapter: dict[int, list[bool]] = {}
+    error_by_chapter: dict[int, list[str]] = {}
+    source_by_chapter: dict[int, list[str]] = {}
+    for chapter_index, chunks in old_by_chapter.items():
+        source_values: list[str] = []
+        translated_values: list[str] = []
+        completed_values: list[bool] = []
+        error_values: list[str] = []
+        for chunk in sorted(chunks, key=lambda item: item.chunk_index):
+            values = completed.get(chunk.id)
+            values = values if isinstance(values, list) and len(values) == len(chunk.paragraphs) else chunk.paragraphs
+            source_values.extend(chunk.paragraphs)
+            translated_values.extend(str(value) for value in values)
+            completed_values.extend([isinstance(completed.get(chunk.id), list) and len(completed[chunk.id]) == len(chunk.paragraphs)] * len(chunk.paragraphs))
+            failed_entry = (data.get("failed") or {}).get(chunk.id, {})
+            error = failed_entry.get("error", "原翻译块未完成") if isinstance(failed_entry, dict) else str(failed_entry)
+            error_values.extend([error] * len(chunk.paragraphs))
+        source_by_chapter[chapter_index] = source_values
+        translated_by_chapter[chapter_index] = translated_values
+        completed_by_chapter[chapter_index] = completed_values
+        error_by_chapter[chapter_index] = error_values
+    rebuilt: dict[str, list[str]] = {}
+    rebuilt_failed: dict[str, dict[str, Any]] = {}
+    old_positions = {index: 0 for index in source_by_chapter}
+    new_count = 0
+    for chunk in new_chunks:
+        source_values = source_by_chapter.get(chunk.chapter_index, [])
+        translated_values = translated_by_chapter.get(chunk.chapter_index, [])
+        position = old_positions.get(chunk.chapter_index, 0)
+        values: list[str] = []
+        statuses: list[bool] = []
+        errors: list[str] = []
+        for paragraph in chunk.paragraphs:
+            if paragraph.startswith("⟦img:") and paragraph.endswith("⟧"):
+                values.append(paragraph)
+                statuses.append(True)
+                errors.append("")
+                new_count += 1
+                continue
+            if position >= len(source_values) or source_values[position] != paragraph:
+                raise ValueError(f"无法安全对齐第 {chunk.chapter_index + 1} 章的原文段落，未修改存档")
+            values.append(translated_values[position])
+            statuses.append(completed_by_chapter.get(chunk.chapter_index, [])[position])
+            errors.append(error_by_chapter.get(chunk.chapter_index, ["原翻译块未完成"])[position])
+            position += 1
+        old_positions[chunk.chapter_index] = position
+        if all(statuses):
+            rebuilt[chunk.id] = values
+        else:
+            rebuilt.pop(chunk.id, None)
+            failed_entry = {"error": next((error for error, status in zip(errors, statuses) if not status), "原翻译块未完成"),
+                            "chapter_index": chunk.chapter_index,
+                            "chapter_title": chunk.chapter_title,
+                            "chunk_index": chunk.chunk_index,
+                            "paragraphs": list(chunk.paragraphs)}
+            rebuilt_failed[chunk.id] = failed_entry
+    if not new_count:
+        return {"path": state_path, "added": 0, "chunks": len(new_chunks), "changed": False}
+    data["completed"] = rebuilt
+    data["failed"] = rebuilt_failed
+    data["total_chunks"] = len(new_chunks)
+    data["chunk_signature"] = _chunk_signature(new_chunks)
+    data["metadata"] = metadata_to_dict(new_book.metadata)
+    state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"path": state_path, "added": new_count, "chunks": len(new_chunks), "changed": True}
 
 
 
