@@ -151,6 +151,7 @@ def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
     old_cfg = _chunk_config(data, config)
     old_chunks = build_chunks(old_book, old_cfg)
     new_chunks = build_chunks(new_book, old_cfg)
+    legacy_state = not bool(data.get("chunk_signature"))
     completed = data.get("completed") or {}
     if not isinstance(completed, dict):
         completed = {}
@@ -183,6 +184,35 @@ def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
     rebuilt_failed: dict[str, dict[str, Any]] = {}
     old_positions = {index: 0 for index in source_by_chapter}
     new_count = 0
+
+    def migrate_legacy_without_images() -> dict[str, Any]:
+        """旧版无法和新图片解析结果对齐时，先升级旧解析版本的存档。
+
+        这样多卷合并仍可使用原有译文；图片补集不伪造引用，并把结果明确返回给 GUI。
+        """
+        if not legacy_state:
+            raise ValueError(f"无法安全对齐存档中的原文，未修改存档")
+        old_signature = _chunk_signature(old_chunks)
+        data["total_chunks"] = len(old_chunks)
+        data["chunk_signature"] = old_signature
+        data["chunk_chars"] = old_cfg.chunk_chars
+        data["max_paragraph_chars"] = old_cfg.max_paragraph_chars
+        data["metadata"] = metadata_to_dict(old_book.metadata)
+        state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "path": state_path,
+            "added": 0,
+            "chunks": len(old_chunks),
+            "changed": True,
+            "migrated": True,
+            "images_skipped": True,
+        }
+
+    def paragraph_key(value: str) -> str:
+        # BeautifulSoup/旧版解析器对 XHTML 空白的折叠方式可能不同，不能把这种
+        # 无语义差异误判为章节错位；图片标记仍保持原样参与匹配。
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
     for chunk in new_chunks:
         source_values = source_by_chapter.get(chunk.chapter_index, [])
         translated_values = translated_by_chapter.get(chunk.chapter_index, [])
@@ -197,7 +227,33 @@ def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
                 errors.append("")
                 new_count += 1
                 continue
-            if position >= len(source_values) or source_values[position] != paragraph:
+            current_matches = (
+                position < len(source_values)
+                and paragraph_key(source_values[position]) == paragraph_key(paragraph)
+            )
+            if not current_matches:
+                # 新解析器只允许在旧段落序列中插入独立图片；若存在少量空白
+                # 节点差异，可安全跳过；任何有意义的旧正文都必须精确对齐。
+                candidate = next(
+                    (
+                        index
+                        for index in range(position + 1, min(len(source_values), position + 4))
+                        if paragraph_key(source_values[index]) == paragraph_key(paragraph)
+                    ),
+                    None,
+                )
+                skipped = source_values[position:candidate] if candidate is not None else []
+                if candidate is None or any(
+                    item and not (item.startswith("⟦img:") and item.endswith("⟧"))
+                    for item in skipped
+                ):
+                    if legacy_state:
+                        return migrate_legacy_without_images()
+                    raise ValueError(f"无法安全对齐第 {chunk.chapter_index + 1} 章的原文段落，未修改存档")
+                position = candidate
+            if position >= len(source_values):
+                if legacy_state:
+                    return migrate_legacy_without_images()
                 raise ValueError(f"无法安全对齐第 {chunk.chapter_index + 1} 章的原文段落，未修改存档")
             values.append(translated_values[position])
             statuses.append(completed_by_chapter.get(chunk.chapter_index, [])[position])
@@ -214,15 +270,26 @@ def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
                             "chunk_index": chunk.chunk_index,
                             "paragraphs": list(chunk.paragraphs)}
             rebuilt_failed[chunk.id] = failed_entry
-    if not new_count:
+    # 旧版存档可能只有 source/completed/failed；只要对齐成功，就升级为当前
+    # 格式，使后续多卷合并、校验重试和图片补集都能复用同一套定位信息。
+    migrated = (
+        data.get("chunk_chars") != old_cfg.chunk_chars
+        or data.get("max_paragraph_chars") != old_cfg.max_paragraph_chars
+        or data.get("total_chunks") != len(new_chunks)
+        or data.get("chunk_signature") != _chunk_signature(new_chunks)
+        or not data.get("metadata")
+    )
+    if not new_count and not migrated:
         return {"path": state_path, "added": 0, "chunks": len(new_chunks), "changed": False}
     data["completed"] = rebuilt
     data["failed"] = rebuilt_failed
     data["total_chunks"] = len(new_chunks)
     data["chunk_signature"] = _chunk_signature(new_chunks)
+    data["chunk_chars"] = old_cfg.chunk_chars
+    data["max_paragraph_chars"] = old_cfg.max_paragraph_chars
     data["metadata"] = metadata_to_dict(new_book.metadata)
     state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"path": state_path, "added": new_count, "chunks": len(new_chunks), "changed": True}
+    return {"path": state_path, "added": new_count, "chunks": len(new_chunks), "changed": True, "migrated": migrated}
 
 
 

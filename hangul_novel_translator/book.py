@@ -1224,18 +1224,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     metadata = book.metadata or {}
     css_resources: list[dict] = list(metadata.get("css_resources") or [])
     doc_inline_css: dict[str, list[str]] = metadata.get("doc_inline_css") or {}
-    needs_cjk_fallback = _needs_cjk_font_fallback(metadata, book.chapters)
-    fallback_css_name = "Styles/zh_font_fallback.css"
-    if needs_cjk_fallback:
-        css_resources.append({
-            "name": fallback_css_name,
-            "content": (
-                '.zh-font-fallback p, .zh-font-fallback h1, .zh-font-fallback h2, '
-                '.zh-font-fallback h3, .zh-font-fallback h4, .zh-font-fallback h5, '
-                '.zh-font-fallback h6 { font-family: "Microsoft YaHei", '
-                '"Noto Sans CJK SC", "Noto Sans SC", sans-serif !important; }'
-            ).encode("utf-8"),
-        })
+    # 保留原书 CSS 的字体、字重和局部样式；中文缺字交给阅读器正常 fallback。
 
     css_names = {
         str(res["name"])
@@ -1270,10 +1259,7 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                     "content": ("\n".join(inline_styles)).encode("utf-8"),
                 }
             )
-        if needs_cjk_fallback:
-            item.add_link(href=_relative_epub_href(file_name, fallback_css_name), rel="stylesheet", type="text/css")
         body = [
-            '<div class="zh-font-fallback">' if needs_cjk_fallback else "",
             f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
         ]
         prev_key = None
@@ -1294,9 +1280,6 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
             first = False
         if not first and prev_style is not None:
             body.append(_ancestors_close(prev_style))
-        if needs_cjk_fallback:
-            body.append("</div>")
-
         item.content = "".join(body)
         out.add_item(item)
         chapter_items.append(item)
