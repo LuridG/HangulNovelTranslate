@@ -16,11 +16,40 @@ from hangul_novel_translator.merge import (
     inspect_state,
     merge_books,
     preview_fix,
+    hangul_char_count,
+    review_translation_state,
 )
 from hangul_novel_translator.translator import build_chunks
 
 
 class MergeLogicTest(unittest.TestCase):
+    def test_review_translation_state_moves_long_korean_completion_to_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "review.txt"
+            source.write_text("제1장 시작\n번역 대상 본문입니다.", encoding="utf-8")
+            book = load_book(source)
+            chunks = build_chunks(book, AppConfig(chunk_chars=1800, max_paragraph_chars=2600))
+            state = {
+                "source": str(source),
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "completed": {chunks[0].id: ["한국어가 아주 길게 이어지는 문장입니다. 이것은 번역되지 않았습니다."]},
+                "failed": {},
+            }
+            state_path = tmp / "review.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = review_translation_state(state_path, AppConfig(), threshold=10)
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["flagged"], 1)
+            self.assertNotIn(chunks[0].id, saved["completed"])
+            self.assertEqual(saved["failed"][chunks[0].id]["paragraphs"], ["번역 대상 본문입니다."])
+
+    def test_review_ignores_short_korean_and_counts_across_spaces(self):
+        self.assertEqual(hangul_char_count("中文 佑胜 OK 한국어"), 3)
+        self.assertEqual(hangul_char_count("문자를 확인한 佑胜은 휴대폰을 넣었다."), 14)
+        self.assertEqual(hangul_char_count("中文 ⟦s:font-style:italic⟧‘아’⟦/s⟧"), 1)
+
     def _make_volume(self, tmp: Path, name: str) -> tuple[Path, Path]:
         """构造一本含 2 段的临时原书 + 一份翻译存档。"""
         txt = tmp / f"{name}.txt"

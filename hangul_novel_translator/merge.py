@@ -30,6 +30,69 @@ from .translator import _chunk_signature, build_chunks
 
 _CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", re.IGNORECASE)
 _CSS_IMPORT_RE = re.compile(r"@import\s+(['\"])([^'\"]+)\1", re.IGNORECASE)
+_HANGUL_RUN_RE = re.compile(r"[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\ud7b0-\ud7ff]+")
+
+
+def hangul_char_count(text: str) -> int:
+    """统计单段中的韩文字符；空格、标点及夹杂的中文专名不打断统计。"""
+    return sum(len(match.group(0)) for match in _HANGUL_RUN_RE.finditer(str(text)))
+
+
+def review_translation_state(
+    state_path: Path,
+    config: AppConfig,
+    *,
+    threshold: int = 30,
+) -> dict[str, Any]:
+    """复查已完成块，把疑似大段漏译的块迁移到 failed，供现有失败块流程处理。"""
+    if threshold < 1:
+        raise ValueError("单段韩文字符阈值必须大于 0")
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    completed = data.get("completed") or {}
+    if not isinstance(completed, dict):
+        completed = {}
+    reviewed_count = len(completed)
+    failed = data.setdefault("failed", {})
+    if not isinstance(failed, dict):
+        failed = {}
+        data["failed"] = failed
+
+    cfg = _chunk_config(data, config)
+    book = load_book(source)
+    chunks = {chunk.id: chunk for chunk in build_chunks(book, cfg)}
+    flagged: list[dict[str, Any]] = []
+    for chunk_id, values in list(completed.items()):
+        if not isinstance(values, list):
+            continue
+        hangul_count = max((hangul_char_count(value) for value in values), default=0)
+        if hangul_count < threshold:
+            continue
+        chunk = chunks.get(str(chunk_id))
+        if chunk is None:
+            flagged.append({"chunk_id": str(chunk_id), "hangul_count": hangul_count, "missing": True})
+            continue
+        failed[str(chunk_id)] = {
+            "error": f"复查发现单段译文含韩文 {hangul_count} 字，疑似未翻译（阈值 {threshold} 字）",
+            "chapter_index": chunk.chapter_index,
+            "chapter_title": chunk.chapter_title,
+            "chunk_index": chunk.chunk_index,
+            "paragraphs": list(chunk.paragraphs),
+        }
+        completed.pop(chunk_id, None)
+        flagged.append({"chunk_id": str(chunk_id), "hangul_count": hangul_count, "missing": False})
+
+    data["completed"] = completed
+    state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "reviewed": reviewed_count,
+        "flagged": len(flagged),
+        "missing": sum(1 for item in flagged if item.get("missing")),
+        "items": flagged,
+    }
 
 
 def inspect_state(path: Path) -> dict[str, Any]:
