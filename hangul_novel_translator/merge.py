@@ -122,6 +122,73 @@ def review_translation_state(
     }
 
 
+def audit_translation_state(
+    state_path: Path,
+    config: AppConfig,
+    *,
+    pattern: str,
+) -> dict[str, Any]:
+    """按用户自定义正则复查已完成块，命中即转入失败块。
+
+    与韩文复查共用同一套失败块持久化结构（含原文章节/段落），方便直接复用
+    现有“失败块查看 / 校验并重试 / 手动编辑”。只检测 completed，不改动未命中块。
+    """
+    state_path = Path(state_path)
+    pattern_text = str(pattern).strip()
+    if not pattern_text:
+        raise ValueError("请先填写失败定义正则")
+    try:
+        regex = re.compile(pattern_text)
+    except re.error as exc:  # noqa: BLE001
+        raise ValueError(f"正则表达式无效：{exc}") from exc
+
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    completed = data.get("completed") or {}
+    if not isinstance(completed, dict):
+        completed = {}
+    reviewed_count = len(completed)
+    failed = data.setdefault("failed", {})
+    if not isinstance(failed, dict):
+        failed = {}
+        data["failed"] = failed
+
+    cfg = _chunk_config(data, config)
+    book = load_book(source)
+    chunks = {chunk.id: chunk for chunk in build_chunks(book, cfg)}
+    flagged: list[dict[str, Any]] = []
+    for chunk_id, values in list(completed.items()):
+        if not isinstance(values, list):
+            continue
+        joined = "\n".join(str(value) for value in values)
+        if not regex.search(joined):
+            continue
+        chunk = chunks.get(str(chunk_id))
+        if chunk is None:
+            flagged.append({"chunk_id": str(chunk_id), "missing": True})
+            continue
+        failed[str(chunk_id)] = {
+            "error": f"自检发现译文命中规则“{pattern_text}”，疑似失败被写入正文",
+            "chapter_index": chunk.chapter_index,
+            "chapter_title": chunk.chapter_title,
+            "chunk_index": chunk.chunk_index,
+            "paragraphs": list(chunk.paragraphs),
+        }
+        completed.pop(chunk_id, None)
+        flagged.append({"chunk_id": str(chunk_id), "missing": False})
+
+    data["completed"] = completed
+    state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "reviewed": reviewed_count,
+        "flagged": len(flagged),
+        "missing": sum(1 for item in flagged if item.get("missing")),
+        "items": flagged,
+    }
+
+
 def inspect_state(path: Path) -> dict[str, Any]:
     """校验并读取一个翻译存档的基本信息。"""
     data = json.loads(Path(path).read_text(encoding="utf-8"))

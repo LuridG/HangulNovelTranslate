@@ -25,7 +25,7 @@ from .config import AppConfig
 from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from .llm import LLMCancelled, LLMClient
-from .merge import book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
+from .merge import audit_translation_state, book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
 from .perspective import (
     PerspectiveBlock,
     PerspectiveConverter,
@@ -1911,6 +1911,7 @@ class App(ctk.CTk):
         ctk.CTkButton(run_frame, text="🔄 校验并重试", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_retry_async).grid(row=0, column=3, padx=4)
         ctk.CTkButton(run_frame, text="🖼 图片补集", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_repair_images_async).grid(row=0, column=4, padx=4)
         ctk.CTkButton(run_frame, text="🔍 复查", width=80, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_review_async).grid(row=0, column=5, padx=4)
+        ctk.CTkButton(run_frame, text="🧰 自检修复块", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_audit_async).grid(row=0, column=6, padx=4)
         ctk.CTkLabel(run_frame, text="单段韩文阈值").grid(row=1, column=0, padx=4, pady=(8, 0), sticky="e")
         ctk.CTkEntry(run_frame, textvariable=self.merge_review_threshold_var, width=70).grid(row=1, column=1, padx=4, pady=(8, 0), sticky="w")
 
@@ -3131,6 +3132,71 @@ class App(ctk.CTk):
             self.log(f"复查注意：有 {missing} 块无法按当前原书定位，未修改存档")
         if not stopped:
             messagebox.showinfo("复查完成", f"共发现 {flagged} 个疑似漏译块。\n这些块已转入失败列表，可点击“失败块查看”或“校验并重试”。", parent=self)
+
+    def _merge_audit_async(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        pattern = simpledialog.askstring(
+            "自检修复块",
+            "输入失败块定义正则（命中即转入失败块）：\n例如：翻译失败|重大错误|reject|unable",
+            parent=self,
+        )
+        if pattern is None:
+            return
+        pattern = pattern.strip()
+        if not pattern:
+            messagebox.showwarning("输入无效", "请填写失败定义正则", parent=self)
+            return
+        selection = self.merge_tree.selection()
+        files = [self.merge_files[int(iid)] for iid in selection] if selection else list(self.merge_files)
+        self.cancel_event.clear()
+        self._set_busy(True)
+        self.progress.set(0)
+        self.status_var.set("自检修复块中…")
+        self.log(f"开始自检修复块：{len(files)} 个存档，规则 {pattern}")
+        self.worker = threading.Thread(target=self._merge_audit_worker, args=(files, pattern), daemon=True)
+        self.worker.start()
+
+    def _merge_audit_worker(self, files: list[Path], pattern: str):
+        stats: list[dict] = []
+        try:
+            config = self._config_from_ui()
+            for index, path in enumerate(files, start=1):
+                if self.cancel_event.is_set():
+                    break
+                try:
+                    result = audit_translation_state(path, config, pattern=pattern)
+                    stats.append({"path": path, **result})
+                except Exception as exc:  # noqa: BLE001
+                    stats.append({"path": path, "error": str(exc)})
+                self.after(0, lambda value=index, total=len(files): self.progress.set(value / total))
+            self.after(0, lambda: self._on_merge_audit_done(stats, self.cancel_event.is_set()))
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            self.after(0, lambda: self._on_error(message))
+
+    def _on_merge_audit_done(self, stats: list[dict], stopped: bool):
+        self._set_busy(False)
+        self.progress.set(1 if not stopped else 0)
+        self.status_var.set("自检修复已停止" if stopped else "自检修复完成")
+        self._refresh_merge_tree()
+        flagged = 0
+        missing = 0
+        for item in stats:
+            if item.get("error"):
+                self.log(f"自检失败：{item['path'].name}：{item['error']}")
+                continue
+            flagged += item.get("flagged", 0)
+            missing += item.get("missing", 0)
+            self.log(f"自检：{item['path'].name} 检查 {item.get('reviewed', 0)} 块，转入失败块 {item.get('flagged', 0)} 块")
+        if missing:
+            self.log(f"自检注意：有 {missing} 块无法按当前原书定位，未修改存档")
+        if not stopped:
+            messagebox.showinfo("自检修复完成", f"共发现 {flagged} 个命中失败定义的块。\n这些块已转入失败列表，可点击“失败块查看”或“校验并重试”。", parent=self)
 
     def _merge_retry_async(self):
         if not self.merge_files:

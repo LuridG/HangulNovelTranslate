@@ -17,12 +17,62 @@ from hangul_novel_translator.merge import (
     merge_books,
     preview_fix,
     hangul_char_count,
+    audit_translation_state,
     review_translation_state,
 )
 from hangul_novel_translator.translator import build_chunks
 
 
 class MergeLogicTest(unittest.TestCase):
+    def test_audit_translation_state_moves_matching_pattern_to_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "audit.txt"
+            source.write_text("제1장 시작\n번역 대상 본문입니다.", encoding="utf-8")
+            book = load_book(source)
+            chunks = build_chunks(book, AppConfig(chunk_chars=1800, max_paragraph_chars=2600))
+            state = {
+                "source": str(source),
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "completed": {
+                    chunks[0].id: ["翻译失败了，请重试。"],
+                },
+                "failed": {},
+            }
+            state_path = tmp / "audit.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = audit_translation_state(state_path, AppConfig(), pattern="翻译失败")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["flagged"], 1)
+            self.assertNotIn(chunks[0].id, saved["completed"])
+            self.assertEqual(saved["failed"][chunks[0].id]["paragraphs"], ["번역 대상 본문입니다."])
+            self.assertIn("翻译失败", saved["failed"][chunks[0].id]["error"])
+
+    def test_audit_ignores_non_matching_blocks_and_validates_pattern(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "audit2.txt"
+            source.write_text("제1장 시작\n본문입니다.", encoding="utf-8")
+            book = load_book(source)
+            chunks = build_chunks(book, AppConfig(chunk_chars=1800, max_paragraph_chars=2600))
+            state = {
+                "source": str(source),
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "completed": {chunks[0].id: ["这是正常翻译结果。"]},
+                "failed": {},
+            }
+            state_path = tmp / "audit2.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = audit_translation_state(state_path, AppConfig(), pattern="翻译失败")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["flagged"], 0)
+            self.assertIn(chunks[0].id, saved["completed"])
+            self.assertEqual(saved["failed"], {})
+            with self.assertRaises(ValueError):
+                audit_translation_state(state_path, AppConfig(), pattern="[")
+
     def test_review_translation_state_moves_long_korean_completion_to_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
