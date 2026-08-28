@@ -1227,12 +1227,15 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
     needs_cjk_fallback = _needs_cjk_font_fallback(metadata, book.chapters)
     fallback_css_name = "Styles/zh_font_fallback.css"
     if needs_cjk_fallback:
-        # 只改 body 的继承字体。原书对 p/class/行内标签显式声明的字体仍有更高的
-        # 规则优先级或保持原样，字号、行距、缩进、对齐和其他 CSS 不受影响。
+        # 韩文小说常把 p/h1/h2 直接声明为韩文字体，只覆盖 body 无法生效。
+        # 这里追加一份最后加载的同优先级规则，把常见正文/标题容器统一改成
+        # 中文字体栈；原 CSS 字节不动，字号、行距、缩进、对齐、class 与行内
+        # 样式完全保留。fallback 是该章最后引入的样式表，靠加载顺序覆盖。
         css_resources.append({
             "name": fallback_css_name,
             "content": (
-                'body { font-family: "Microsoft YaHei", "Noto Sans CJK SC", '
+                'body, p, h1, h2, h3, h4, h5, h6, div, span, li, blockquote, '
+                'td, th, a { font-family: "Microsoft YaHei", "Noto Sans CJK SC", '
                 '"Noto Sans SC", sans-serif; }'
             ).encode("utf-8"),
         })

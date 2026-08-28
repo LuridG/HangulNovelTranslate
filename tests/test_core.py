@@ -7,6 +7,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hangul_novel_translator.book import (
+    Book,
+    Chapter,
+    _needs_cjk_font_fallback,
     _prepare_epub_for_reader,
     export_epub,
     parse_epub,
@@ -202,6 +205,37 @@ class EpubParsingRegressionTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_EPUB, "需要 ebooklib")
 class EpubStylePreservationTest(unittest.TestCase):
+    def test_korean_font_fallback_covers_paragraph_and_heading(self):
+        """段落/标题显式声明韩文字体时，应追加覆盖级规则而非改写原 CSS。"""
+        from hangul_novel_translator.book import _as_text
+
+        chapters = [Chapter(0, "第1章", ["这是中文正文段落。"], source_id="Text/chap.xhtml")]
+        metadata = {
+            "css_resources": [
+                {"name": "Styles/sy.css", "content": 'p { font-family: 굴림; font-size: 1em; }'.encode("utf-8")},
+            ],
+            "chapter_css": {"Text/chap.xhtml": ["Styles/sy.css"]},
+        }
+        book = Book(title="测试", chapters=chapters, metadata=metadata)
+        self.assertTrue(_needs_cjk_font_fallback(book.metadata, book.chapters))
+
+        import tempfile
+        from pathlib import Path
+        from hangul_novel_translator.book import export_epub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.epub"
+            export_epub(book, out)
+            import zipfile
+            with zipfile.ZipFile(out) as zf:
+                names = set(zf.namelist())
+                fallback = next((n for n in names if "zh_font_fallback" in n), None)
+                self.assertIsNotNone(fallback)
+                css_text = zf.read(fallback).decode("utf-8")
+                self.assertIn("p, h1", css_text.replace(", ", ", "))
+                orig = next((n for n in names if n.endswith("Styles/sy.css")), None)
+                self.assertIsNotNone(orig)
+                self.assertIn("font-family: 굴림", zf.read(orig).decode("utf-8"))
     def _make_styled_book(self, tmp: Path) -> Path:
         src = epub_lib.EpubBook()
         src.set_identifier("style-0001")

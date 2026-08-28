@@ -224,6 +224,35 @@ class MergeStyleResourceTest(unittest.TestCase):
         self.assertIn("\u27e6img:Images/p1.png\u27e7", paras[0])
         self.assertIn("\u27e6img:Images/p1_v2.png\u27e7", paras[1])
 
+    def test_merge_normalizes_parent_dir_image_names(self):
+        """带 ../ 的图片应落到 Images/，正文与 CSS 引用同步改写。"""
+        book = Book(
+            title="卷一",
+            chapters=[
+                Chapter(
+                    0,
+                    "第1章",
+                    ["正文 \u27e6img:../dnjakrdlTek123.png\u27e7 结尾"],
+                    source_id="Text/chap.xhtml",
+                )
+            ],
+            metadata={
+                "css_resources": [
+                    {"name": "Styles/sy.css", "content": b"body { background: url('../../dnjakrdlTek123.png'); }"},
+                ],
+                "images": [{"name": "../dnjakrdlTek123.png", "content": b"\x89PNG"}],
+                "chapter_css": {"Text/chap.xhtml": ["Styles/sy.css"]},
+            },
+        )
+        merged = merge_books([book])
+        img_names = [r["name"] for r in merged.metadata["images"]]
+        self.assertIn("Images/dnjakrdlTek123.png", img_names)
+        self.assertNotIn("..", "".join(img_names))
+        css = {r["name"]: r["content"] for r in merged.metadata["css_resources"]}
+        self.assertIn(b"Images/dnjakrdlTek123.png", css["Styles/sy.css"])
+        paras = [ch.paragraphs[0] for ch in merged.chapters if ch.title != "第1卷"]
+        self.assertIn("\u27e6img:Images/dnjakrdlTek123.png\u27e7", paras[0])
+
     def test_merge_rewrites_css_relative_resources_with_full_paths(self):
         b1 = Book(
             title="卷一",

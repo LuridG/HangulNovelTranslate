@@ -33,6 +33,33 @@ _CSS_IMPORT_RE = re.compile(r"@import\s+(['\"])([^'\"]+)\1", re.IGNORECASE)
 _HANGUL_RUN_RE = re.compile(r"[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\ud7b0-\ud7ff]+")
 
 
+def _is_path_escape(name: str) -> bool:
+    """判断资源名是否包含 .. 目录跳转，这类路径会被 EPUB 工具判为包外引用。"""
+    value = str(name).replace("\\", "/")
+    return any(part in ("..",) for part in value.split("/"))
+
+
+def _safe_resource_name(name: str) -> str:
+    """把带 .. 的包内资源名规范化为根目录下的安全路径。
+
+    图片统一落到 Images/，样式落到 Styles/，其余落到 Misc/。
+    只调整最终打包路径，原引用（正文 ⟦img:...⟧、CSS url()）由调用方
+    通过 target map 一并改写，因此不改动原名字符串本身的匹配关系。
+    """
+    value = str(name).replace("\\", "/").lstrip("/")
+    if not _is_path_escape(value):
+        return value
+    basename = posixpath.basename(value)
+    if not basename:
+        return value
+    lower = basename.lower()
+    if lower.endswith(".css"):
+        return posixpath.join("Styles", basename)
+    if lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+        return posixpath.join("Images", basename)
+    return posixpath.join("Misc", basename)
+
+
 def hangul_char_count(text: str) -> int:
     """统计单段中的韩文字符；空格、标点及夹杂的中文专名不打断统计。"""
     return sum(len(match.group(0)) for match in _HANGUL_RUN_RE.finditer(str(text)))
@@ -476,14 +503,15 @@ def _merge_static_resources(books: list[Book]):
             if not name:
                 continue
             content = _as_bytes(res.get("content", b""))
-            base = _href_basename(name)
+            safe_name = _safe_resource_name(name)
+            base = _href_basename(safe_name)
             reused = next(
                 (
                     full
                     for full, data in by_base.get(base, [])
                     if data == content
                     and (
-                        not name.lower().endswith(".css")
+                        not safe_name.lower().endswith(".css")
                         or _css_dependencies_match(
                             name,
                             content.decode("utf-8", errors="ignore"),
@@ -497,11 +525,11 @@ def _merge_static_resources(books: list[Book]):
             if reused:
                 target[name] = reused
                 continue
-            candidate = name
+            candidate = safe_name
             if candidate in by_name:
-                parent = posixpath.dirname(name)
-                stem = posixpath.splitext(posixpath.basename(name))[0]
-                suffix = posixpath.splitext(name)[1]
+                parent = posixpath.dirname(safe_name) or "."
+                stem = posixpath.splitext(posixpath.basename(safe_name))[0]
+                suffix = posixpath.splitext(safe_name)[1]
                 candidate = posixpath.join(parent, f"{stem}_v{volume_index}{suffix}")
                 guard = 2
                 while candidate in by_name:
