@@ -1840,6 +1840,10 @@ class App(ctk.CTk):
         self.merge_txt_var = tk.BooleanVar(value=True)
         self.merge_epub_var = tk.BooleanVar(value=True)
         self.merge_review_threshold_var = tk.StringVar(value="30")
+        self.audit_patterns = list(self.ui_state.get("audit_patterns") or [])
+        self.audit_pattern_names = [str(item.get("name", "未命名规则")) for item in self.audit_patterns]
+        self.audit_pattern_var = tk.StringVar(value=self.audit_pattern_names[0] if self.audit_pattern_names else "")
+        self._audit_pattern_loading = False
 
         ctk.CTkLabel(
             parent,
@@ -1911,17 +1915,52 @@ class App(ctk.CTk):
         ctk.CTkButton(run_frame, text="🔄 校验并重试", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_retry_async).grid(row=0, column=3, padx=4)
         ctk.CTkButton(run_frame, text="🖼 图片补集", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_repair_images_async).grid(row=0, column=4, padx=4)
         ctk.CTkButton(run_frame, text="🔍 复查", width=80, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_review_async).grid(row=0, column=5, padx=4)
-        ctk.CTkButton(run_frame, text="🧰 自检修复块", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_audit_async).grid(row=0, column=6, padx=4)
         ctk.CTkLabel(run_frame, text="单段韩文阈值").grid(row=1, column=0, padx=4, pady=(8, 0), sticky="e")
         ctk.CTkEntry(run_frame, textvariable=self.merge_review_threshold_var, width=70).grid(row=1, column=1, padx=4, pady=(8, 0), sticky="w")
 
+        audit_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        audit_frame.grid(row=5, column=0, padx=12, pady=(0, 8), sticky="ew")
+        audit_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(audit_frame, text="自检修复规则", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, padx=(4, 8), sticky="w")
+        self.audit_pattern_menu = ctk.CTkComboBox(
+            audit_frame,
+            variable=self.audit_pattern_var,
+            values=self.audit_pattern_names,
+            width=180,
+            command=self._on_audit_pattern_selected,
+        )
+        self.audit_pattern_menu.grid(row=0, column=1, padx=4, sticky="ew")
+        ctk.CTkButton(
+            audit_frame, text="💾 保存规则", width=90,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._save_audit_pattern,
+        ).grid(row=0, column=2, padx=4)
+        self._delete_audit_pattern_btn = ctk.CTkButton(
+            audit_frame, text="🗑 删除规则", width=90,
+            fg_color=THEME["secondary"], hover_color=THEME["danger"],
+            border_width=1, border_color=THEME["card_border"], command=self._delete_audit_pattern,
+        )
+        self._delete_audit_pattern_btn.grid(row=0, column=3, padx=4, sticky="e")
+
+        audit_edit_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        audit_edit_frame.grid(row=6, column=0, padx=12, pady=(0, 8), sticky="ew")
+        audit_edit_frame.grid_columnconfigure(0, weight=1)
+        self.audit_pattern_box = ctk.CTkTextbox(audit_edit_frame, height=4, border_width=1, border_color=THEME["card_border"])
+        self.audit_pattern_box.grid(row=0, column=0, padx=4, sticky="ew")
+        ctk.CTkButton(
+            audit_edit_frame, text="🧰 自检修复块", width=120,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._merge_audit_async,
+        ).grid(row=0, column=1, padx=(8, 4), sticky="e")
+
         ctk.CTkLabel(
             parent,
-            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；“复查”会统计每段已完成译文的韩文字符数，命中后转入失败块，可继续查看、重试或手动补翻。",
+            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；“复查”统计韩文字符数；“自检修复块”按自定义正则识别混入译文的失败字段。",
             wraplength=620,
             justify="left",
             anchor="w",
-        ).grid(row=5, column=0, padx=12, pady=(0, 12), sticky="w")
+        ).grid(row=7, column=0, padx=12, pady=(0, 12), sticky="w")
+
+        self._refresh_audit_patterns()
 
     def _build_fixer_tab(self, parent):
         parent.grid_columnconfigure(0, weight=1)
@@ -3140,13 +3179,7 @@ class App(ctk.CTk):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
             return
-        pattern = simpledialog.askstring(
-            "自检修复块",
-            "输入失败块定义正则（命中即转入失败块）：\n例如：翻译失败|重大错误|reject|unable",
-            parent=self,
-        )
-        if pattern is None:
-            return
+        pattern = self.audit_pattern_box.get("1.0", "end").strip()
         pattern = pattern.strip()
         if not pattern:
             messagebox.showwarning("输入无效", "请填写失败定义正则", parent=self)
@@ -3197,6 +3230,78 @@ class App(ctk.CTk):
             self.log(f"自检注意：有 {missing} 块无法按当前原书定位，未修改存档")
         if not stopped:
             messagebox.showinfo("自检修复完成", f"共发现 {flagged} 个命中失败定义的块。\n这些块已转入失败列表，可点击“失败块查看”或“校验并重试”。", parent=self)
+
+    # ---------------- 自检修复规则管理 ----------------
+    def _get_audit_pattern(self) -> dict[str, Any] | None:
+        name = self.audit_pattern_var.get().strip()
+        if not name:
+            return None
+        return next((item for item in self.audit_patterns if item.get("name") == name), None)
+
+    def _on_audit_pattern_selected(self, name):
+        if self._audit_pattern_loading:
+            return
+        item = next((it for it in self.audit_patterns if it.get("name") == name), None)
+        if item:
+            self._audit_pattern_loading = True
+            self.audit_pattern_box.delete("1.0", "end")
+            self.audit_pattern_box.insert("end", str(item.get("pattern", "")))
+            self._audit_pattern_loading = False
+
+    def _save_audit_pattern(self):
+        pattern = self.audit_pattern_box.get("1.0", "end").strip()
+        if not pattern:
+            messagebox.showwarning("提示", "请先在上方文本框填写失败定义正则", parent=self)
+            return
+        name = simpledialog.askstring("保存自检规则", "规则名称：", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self.audit_patterns = [item for item in self.audit_patterns if item.get("name") != name]
+        self.audit_patterns.append({"name": name, "pattern": pattern})
+        self.audit_pattern_names = [str(item.get("name")) for item in self.audit_patterns]
+        self.audit_pattern_var.set(name)
+        self._refresh_audit_patterns()
+        self._persist_audit_patterns()
+
+    def _delete_audit_pattern(self):
+        name = self.audit_pattern_var.get().strip()
+        if not name:
+            return
+        old = len(self.audit_patterns)
+        self.audit_patterns = [item for item in self.audit_patterns if item.get("name") != name]
+        if len(self.audit_patterns) == old:
+            return
+        self.audit_pattern_names = [str(item.get("name")) for item in self.audit_patterns]
+        if self.audit_pattern_names:
+            self.audit_pattern_var.set(self.audit_pattern_names[0])
+        else:
+            self.audit_pattern_var.set("")
+        self._refresh_audit_patterns()
+        self._persist_audit_patterns()
+
+    def _refresh_audit_patterns(self):
+        self._audit_pattern_loading = True
+        self.audit_pattern_menu.configure(values=self.audit_pattern_names)
+        current = self.audit_pattern_var.get()
+        if current and current in self.audit_pattern_names:
+            item = next((it for it in self.audit_patterns if it.get("name") == current), None)
+            if item:
+                self.audit_pattern_box.delete("1.0", "end")
+                self.audit_pattern_box.insert("end", str(item.get("pattern", "")))
+        elif self.audit_pattern_names:
+            self.audit_pattern_var.set(self.audit_pattern_names[0])
+            item = next(it for it in self.audit_patterns if it.get("name") == self.audit_pattern_names[0])
+            self.audit_pattern_box.delete("1.0", "end")
+            self.audit_pattern_box.insert("end", str(item.get("pattern", "")))
+        else:
+            self.audit_pattern_box.delete("1.0", "end")
+        self._audit_pattern_loading = False
+
+    def _persist_audit_patterns(self):
+        state = _load_ui_state()
+        state["audit_patterns"] = self.audit_patterns
+        _save_ui_state(state)
 
     def _merge_retry_async(self):
         if not self.merge_files:
