@@ -744,6 +744,67 @@ def _rewrite_inline_image_hrefs(text: str, document_path: str) -> str:
     )
 
 
+_DOC_PAGE_SUFFIXES = (".html", ".xhtml", ".htm")
+_HREF_ATTR_RE = re.compile(r"(href\s*=\s*[\"'])([^\"']+)([\"'])", re.IGNORECASE)
+
+
+def _chapter_volume(source_id: str | None) -> str:
+    """从合并后的 source_id 提取卷前缀（如 ``v1:Section0011.html`` → ``v1``）。
+
+    未合并的单卷存档 source_id 没有前缀，统一返回空串，作为同一个命名空间。
+    """
+    sid = str(source_id or "")
+    if ":" in sid:
+        prefix, _ = sid.split(":", 1)
+        if re.fullmatch(r"v\d+", prefix):
+            return prefix
+    return ""
+
+
+def _rewrite_internal_doc_links(
+    html: str,
+    volume: str,
+    chapter_href_map: dict[tuple[str, str], str],
+    anchor_map: dict[tuple[str, str], str] | None = None,
+) -> str:
+    """把指向原书其他章节（HTML）的 href 改写为合并后的章节文件名。
+
+    原书脚注常用跨文件引用，例如 ``../Text/Section0011.html#cmm01``；正文中的
+    引用指向独立注释页，注释页又反向指回正文章节。导出时每个章节被重命名为
+    ``chap_NNNN.xhtml``，不改写这些 href 则所有脚注链接全部失效。
+
+    - 优先按「(卷, 源文件名)」找到目标章节（适用于独立注释页）。
+    - 目标源文件若在解析时并入其他章节（无独立章节），回退按 ``#锚点`` 在
+      全部输出章节中查找其实际所在文件，保证反向链接也能落地。
+    """
+    anchor_map = anchor_map or {}
+
+    def repl(match) -> str:
+        quote = match.group(1)
+        href = match.group(2)
+        close = match.group(3)
+        lowered = href.lower()
+        if lowered.startswith(("#", "http:", "https:", "data:", "mailto:", "javascript:")):
+            return match.group(0)
+        parsed = urlparse(href)
+        path = unquote(parsed.path)
+        if not path:
+            return match.group(0)
+        target_base = _href_basename(path).lower()
+        if not target_base.endswith(_DOC_PAGE_SUFFIXES):
+            return match.group(0)
+        fragment = parsed.fragment
+        new_file = chapter_href_map.get((volume, target_base))
+        if not new_file and fragment:
+            new_file = anchor_map.get((volume, fragment))
+        if not new_file:
+            return match.group(0)
+        new_href = f"{new_file}#{fragment}" if fragment else new_file
+        return f"{quote}{new_href}{close}"
+
+    return _HREF_ATTR_RE.sub(repl, html)
+
+
 def strip_inline_markers(text: str, *, image_placeholder: str = "【插图】") -> str:
     """去掉行内格式标记，用于 TXT 输出与词表采样。"""
     def _repl(match) -> str:
@@ -1249,6 +1310,13 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
 
     chapter_items: list = []
     exported_structure: dict[str, dict] = {}
+    rendered: list[tuple] = []
+    chapter_href_map: dict[tuple[str, str], str] = {}
+    for i, chapter in enumerate(book.chapters, start=1):
+        base = _href_basename(chapter.source_id or "").lower()
+        if base:
+            chapter_href_map[(_chapter_volume(chapter.source_id), base)] = f"chap_{i:04d}.xhtml"
+
     for i, chapter in enumerate(book.chapters, start=1):
         file_name = f"chap_{i:04d}.xhtml"
         item = epub.EpubHtml(title=chapter.display_title, file_name=file_name, lang="zh")
@@ -1296,7 +1364,14 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
             first = False
         if not first and prev_style is not None:
             body.append(_ancestors_close(prev_style))
-        item.content = "".join(body)
+        rendered.append((item, _chapter_volume(chapter.source_id), "".join(body)))
+
+    anchor_map: dict[tuple[str, str], str] = {}
+    for item, volume, body_html in rendered:
+        for anchor in re.findall(r'id="([^"]+)"', body_html):
+            anchor_map.setdefault((volume, anchor), item.file_name)
+    for item, volume, body_html in rendered:
+        item.content = _rewrite_internal_doc_links(body_html, volume, chapter_href_map, anchor_map)
         out.add_item(item)
         chapter_items.append(item)
 

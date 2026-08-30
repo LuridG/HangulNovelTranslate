@@ -421,6 +421,64 @@ class EpubInlineFormatTest(unittest.TestCase):
         text = "안녕 \u27e6b\u27e7세상\u27e6/b\u27e7 \u27e6img:Images/p1.png\u27e7"
         self.assertEqual(strip_inline_markers(text), "안녕 세상 【插图】")
 
+    def test_export_rewrites_cross_file_footnote_links(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = epub_lib.EpubBook()
+            src.set_identifier("fn-cross-0001")
+            src.set_title("각주 테스트")
+            src.set_language("ko")
+            chap = epub_lib.EpubHtml(
+                uid="Chap.html", title="제1장", file_name="Text/Chap.html", lang="ko"
+            )
+            # 真实书用 .html 文件名但声明为 XHTML；ebooklib 默认按扩展名判为
+            # text/html，需显式覆盖才能被当作文档解析。
+            chap.media_type = "application/xhtml+xml"
+            chap.content = (
+                "<html><head></head><body>"
+                "<h1>제1장</h1>"
+                '<p>본문<sup><a id="cmm_01" href="../Text/Notes.html#cmm01">1)</a></sup></p>'
+                "</body></html>"
+            )
+            notes = epub_lib.EpubHtml(
+                uid="Notes.html", title="각주 모음", file_name="Text/Notes.html", lang="ko"
+            )
+            notes.media_type = "application/xhtml+xml"
+            notes.content = (
+                "<html><head></head><body>"
+                "<h1>각주 모음</h1>"
+                '<p><a id="cmm01" href="../Text/Chap.html#cmm_01">1)</a> 주석 내용.</p>'
+                "</body></html>"
+            )
+            src.add_item(chap)
+            src.add_item(notes)
+            src.toc = (
+                epub_lib.Link("Text/Chap.html", "제1장", "chap"),
+                epub_lib.Link("Text/Notes.html", "각주 모음", "notes"),
+            )
+            src.add_item(epub_lib.EpubNcx())
+            src.add_item(epub_lib.EpubNav())
+            src.spine = ["nav", chap, notes]
+            path = tmp / "cross-fn.epub"
+            epub_lib.write_epub(str(path), src)
+
+            from hangul_novel_translator.book import export_epub, parse_epub
+
+            book = parse_epub(path)
+            out = tmp / "cross-fn-out.epub"
+            export_epub(book, out)
+            with zipfile.ZipFile(out) as zf:
+                names = {n for n in zf.namelist() if n.endswith(".xhtml") and "nav" not in n}
+                self.assertIn("EPUB/chap_0001.xhtml", names)
+                self.assertIn("EPUB/chap_0002.xhtml", names)
+                body1 = zf.read("EPUB/chap_0001.xhtml").decode("utf-8")
+                body2 = zf.read("EPUB/chap_0002.xhtml").decode("utf-8")
+                self.assertIn('href="chap_0002.xhtml#cmm01"', body1)
+                self.assertIn('href="chap_0001.xhtml#cmm_01"', body2)
+                self.assertIn('id="cmm01"', body2)
+
     def test_metadata_json_round_trip(self):
         import json as jsonlib
 
