@@ -1131,6 +1131,13 @@ def _mime_for_name(name: str) -> str:
     }.get(ext, "application/octet-stream")
 
 
+def _looks_like_cover_image(name: str) -> bool:
+    """按文件名判断是否为封面：去掉扩展名与非字母数字后，名称以 cover 开头。"""
+    base = Path(str(name)).name.lower()
+    stem = "".join(ch for ch in base if ch.isalnum())
+    return stem.startswith("cover")
+
+
 def _contains_cjk_text(value: str) -> bool:
     """检测中日韩统一表意文字；用于只对中文翻译启用字体兼容层。"""
     return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", value or ""))
@@ -1386,17 +1393,37 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                     content=res["content"],
                 )
             )
-    for img in metadata.get("images") or []:
+    images = list(metadata.get("images") or [])
+    cover_img = next(
+        (
+            img
+            for img in images
+            if _looks_like_cover_image(str(img.get("name", ""))) and img.get("content")
+        ),
+        None,
+    )
+    for img in images:
         name = str(img.get("name", ""))
-        if name and not any(it.file_name == name for it in out.items):
-            out.add_item(
-                epub.EpubItem(
-                    uid=f"img-{len(out.items)}",
-                    file_name=name,
-                    media_type=_mime_for_name(name),
-                    content=img.get("content", b""),
-                )
+        if not name or any(it.file_name == name for it in out.items):
+            continue
+        if img is cover_img:
+            # 封面稍后单独作为 EpubCover 声明，避免重复加入同类项。
+            continue
+        out.add_item(
+            epub.EpubItem(
+                uid=f"img-{len(out.items)}",
+                file_name=name,
+                media_type=_mime_for_name(name),
+                content=img.get("content", b""),
             )
+        )
+    if cover_img is not None:
+        cover_name = str(cover_img.get("name", ""))
+        cover_item = epub.EpubCover(uid="cover-img", file_name=cover_name)
+        cover_item.media_type = _mime_for_name(cover_name)
+        cover_item.content = cover_img.get("content", b"")
+        out.add_item(cover_item)
+        out.add_metadata(None, "meta", "", {"name": "cover", "content": "cover-img"})
 
     def toc_node(node: int | tuple):
         """把 index 级树转换为 ebooklib 的嵌套 TOC 元组。"""

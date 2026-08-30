@@ -221,6 +221,27 @@ def detect_merge_title(titles: list[str]) -> str:
     return prefix.rstrip(" \t·-—_/")
 
 
+_STATE_FILE_SUFFIX = re.compile(r"\.translation_state\.json$|\.json$", re.IGNORECASE)
+_VOLUME_MARK_RE = re.compile(
+    r"(?:[\s_\-·.:：、]*"
+    r"(?:"
+    r"第\s*[0-9一二三四五六七八九十百千〇零]+[卷권册部集篇]"
+    r"|[0-9一二三四五六七八九十百千〇零]+[卷권册部集篇]"
+    r"|(?:上|中|下)(?:卷|권|册|部|集|篇)?"
+    r"|前传|后传|外传|番外|序章|终章"
+    r")"
+    r")$"
+)
+
+
+def archive_filename_title(path: Path) -> str:
+    """从翻译存档文件名提取用户自定义书名，并去掉末尾的分卷标记。
+    例如：烟灰_第1卷.translation_state.json → 烟灰。"""
+    name = _STATE_FILE_SUFFIX.sub("", str(path.name)).strip()
+    name = _VOLUME_MARK_RE.sub("", name)
+    return name.strip()
+
+
 def _chunk_config(state: dict[str, Any], config: AppConfig) -> AppConfig:
     """重组时优先使用翻译时存档的分块参数，避免后来修改参数导致 chunk 错位。"""
     kwargs: dict[str, Any] = {}

@@ -25,7 +25,7 @@ from ..config import AppConfig
 from ..epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from ..glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from ..llm import LLMCancelled, LLMClient
-from ..merge import audit_translation_state, book_from_state, detect_merge_title, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
+from ..merge import archive_filename_title, audit_translation_state, book_from_state, detect_merge_title, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
 from ..perspective import (
     PerspectiveBlock,
     PerspectiveConverter,
@@ -1858,10 +1858,12 @@ class App(ctk.CTk):
         for index, path in enumerate(self.merge_files):
             try:
                 info = inspect_state(path)
+                # 优先用存档文件名提取书名，取不到再退回原书/元数据名。
+                display_title = archive_filename_title(path) or info["title"]
                 detail = (
-                    f"{info['title']} · 完成 {info['completed']}/{info['total_chunks']} 块"
+                    f"{display_title} · 完成 {info['completed']}/{info['total_chunks']} 块"
                 )
-                titles.append(info["title"])
+                titles.append(display_title)
             except Exception as exc:  # noqa: BLE001
                 detail = f"读取失败：{exc}"
             self.merge_tree.insert("", "end", iid=str(index), values=(index + 1, str(path), detail))

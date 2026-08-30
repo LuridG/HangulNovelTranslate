@@ -10,6 +10,7 @@ from hangul_novel_translator.book import Book, Chapter, load_book
 from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary, GlossaryEntry
 from hangul_novel_translator.merge import (
+    archive_filename_title,
     book_from_state,
     detect_merge_title,
     export_merged,
@@ -482,6 +483,20 @@ class DetectMergeTitleTest(unittest.TestCase):
 
     def test_unrelated_titles_return_empty(self):
         self.assertEqual(detect_merge_title(["甲书", "乙书"]), "")
+
+
+class ArchiveFilenameTitleTest(unittest.TestCase):
+    def test_strips_state_suffix_and_volume_marker(self):
+        self.assertEqual(archive_filename_title(Path("烟灰_第1卷.translation_state.json")), "烟灰")
+        self.assertEqual(archive_filename_title(Path("烟灰_第4卷.json")), "烟灰")
+
+    def test_handles_separators_and_cn_korean_volume_words(self):
+        self.assertEqual(archive_filename_title(Path("烟灰 上卷.translation_state.json")), "烟灰")
+        self.assertEqual(archive_filename_title(Path("烟灰·外传.translation_state.json")), "烟灰")
+        self.assertEqual(archive_filename_title(Path("烟灰 1권.translation_state.json")), "烟灰")
+
+    def test_plain_name_preserved(self):
+        self.assertEqual(archive_filename_title(Path("烟灰.translation_state.json")), "烟灰")
 
 
 if __name__ == "__main__":
