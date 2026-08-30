@@ -587,7 +587,7 @@ class App(ctk.CTk):
 
         self.merge_files: list[Path] = []
         self.merge_title_var = tk.StringVar(value="")
-        self._merge_title_manual = False
+        self._merge_title_auto_last = ""
         self.merge_txt_var = tk.BooleanVar(value=True)
         self.merge_epub_var = tk.BooleanVar(value=True)
         self.merge_review_threshold_var = tk.StringVar(value="30")
@@ -641,7 +641,6 @@ class App(ctk.CTk):
         ctk.CTkLabel(cfg_frame, text="合并书名").grid(row=0, column=0, padx=(4, 8), sticky="w")
         self.merge_title_entry = ctk.CTkEntry(cfg_frame, textvariable=self.merge_title_var, width=240)
         self.merge_title_entry.grid(row=0, column=1, padx=4, sticky="w")
-        self.merge_title_entry.bind("<KeyRelease>", self._on_merge_title_edited)
         ctk.CTkCheckBox(cfg_frame, text="输出 TXT", variable=self.merge_txt_var).grid(row=0, column=2, padx=(18, 4))
         ctk.CTkCheckBox(cfg_frame, text="输出 EPUB", variable=self.merge_epub_var).grid(row=0, column=3, padx=4)
         ctk.CTkCheckBox(
@@ -1867,14 +1866,14 @@ class App(ctk.CTk):
             except Exception as exc:  # noqa: BLE001
                 detail = f"读取失败：{exc}"
             self.merge_tree.insert("", "end", iid=str(index), values=(index + 1, str(path), detail))
-        if not self._merge_title_manual:
-            detected = detect_merge_title(titles)
-            if detected:
+        detected = detect_merge_title(titles)
+        if detected:
+            current = self.merge_title_var.get().strip()
+            # 用户没有手动改名（当前值等于上次自动值或为空）时才覆盖，
+            # 避免清空再添加后不再自动提取，也保留用户自定义书名。
+            if not current or current == self._merge_title_auto_last:
                 self.merge_title_var.set(detected)
-
-    def _on_merge_title_edited(self, _event=None):
-        # 用户手动改动后，不再自动覆盖，保留其自定义书名。
-        self._merge_title_manual = True
+                self._merge_title_auto_last = detected
 
     def _merge_review_async(self):
         if not self.merge_files:

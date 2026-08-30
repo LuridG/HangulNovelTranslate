@@ -221,7 +221,7 @@ def detect_merge_title(titles: list[str]) -> str:
     return prefix.rstrip(" \t·-—_/")
 
 
-_STATE_FILE_SUFFIX = re.compile(r"\.translation_state\.json$|\.json$", re.IGNORECASE)
+_STATE_FILE_SUFFIX = re.compile(r"\.translation_state(?:\.json)?$|\.json$", re.IGNORECASE)
 _VOLUME_MARK_RE = re.compile(
     r"(?:[\s_\-·.:：、]*"
     r"(?:"
@@ -239,7 +239,8 @@ def archive_filename_title(path: Path) -> str:
     例如：烟灰_第1卷.translation_state.json → 烟灰。"""
     name = _STATE_FILE_SUFFIX.sub("", str(path.name)).strip()
     name = _VOLUME_MARK_RE.sub("", name)
-    return name.strip()
+    # 生成的文件名会带一个隐藏文件前导点（如 .书名_第1卷.translation_state.json）。
+    return name.strip().lstrip(".")
 
 
 def _chunk_config(state: dict[str, Any], config: AppConfig) -> AppConfig:

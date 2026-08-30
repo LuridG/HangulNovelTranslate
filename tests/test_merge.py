@@ -490,6 +490,10 @@ class ArchiveFilenameTitleTest(unittest.TestCase):
         self.assertEqual(archive_filename_title(Path("烟灰_第1卷.translation_state.json")), "烟灰")
         self.assertEqual(archive_filename_title(Path("烟灰_第4卷.json")), "烟灰")
 
+    def test_strips_leading_hidden_dot(self):
+        self.assertEqual(archive_filename_title(Path(".Kiss_me_Liar_第1卷.translation_state.json")), "Kiss_me_Liar")
+        self.assertEqual(archive_filename_title(Path(".烟灰_第2卷.translation_state.json")), "烟灰")
+
     def test_handles_separators_and_cn_korean_volume_words(self):
         self.assertEqual(archive_filename_title(Path("烟灰 上卷.translation_state.json")), "烟灰")
         self.assertEqual(archive_filename_title(Path("烟灰·外传.translation_state.json")), "烟灰")
