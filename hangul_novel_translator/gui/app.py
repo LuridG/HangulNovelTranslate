@@ -1,4 +1,4 @@
-# hangul_novel_translator/gui.py
+# hangul_novel_translator/gui/app.py
 from __future__ import annotations
 
 import json
@@ -19,14 +19,14 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError("请先安装 customtkinter：pip install customtkinter") from exc
 
 from typing import Any
-from .sanitizer import CustomRule, ExportSanitizer, SanitizerConfig
-from .book import load_book
-from .config import AppConfig
-from .epub_fixer import fix_finished_epub_in_place, preview_finished_epub
-from .glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
-from .llm import LLMCancelled, LLMClient
-from .merge import audit_translation_state, book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
-from .perspective import (
+from ..sanitizer import CustomRule, ExportSanitizer, SanitizerConfig
+from ..book import load_book
+from ..config import AppConfig
+from ..epub_fixer import fix_finished_epub_in_place, preview_finished_epub
+from ..glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
+from ..llm import LLMCancelled, LLMClient
+from ..merge import audit_translation_state, book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
+from ..perspective import (
     PerspectiveBlock,
     PerspectiveConverter,
     PerspectiveFailedBlock,
@@ -40,7 +40,7 @@ from .perspective import (
     save_perspective_failure,
     save_manual_perspective_translation,
 )
-from .translator import (
+from ..translator import (
     FailedChunk,
     TranslationCancelled,
     TranslationResult,
@@ -52,1318 +52,21 @@ from .translator import (
     save_manual_translation,
     sample_chapter_report,
 )
-from .utils import extract_json, parse_paragraphs_from_payload
+from ..utils import extract_json, parse_paragraphs_from_payload
 
 
-# 配置固定在项目根目录，避免因启动目录不同导致读不到/写错位置。
-_UI_CONFIG_PATH = Path(__file__).resolve().parent.parent / ".gui_config.json"
+from .theme import THEME, _apply_ttk_theme
+from .state import _load_ui_state, _save_ui_state
+from .widgets import TreeviewTooltip, DebouncedScrollableFrame
+from .dialogs import (
+    GlossaryEditDialog,
+    SanitizerRuleDialog,
+    FailedChunkEditorDialog,
+    PerspectiveFailedEditorDialog,
+)
 
 
-def _load_ui_state() -> dict[str, Any]:
-    try:
-        if _UI_CONFIG_PATH.exists():
-            return json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _save_ui_state(state: dict[str, Any]) -> None:
-    try:
-        _UI_CONFIG_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-class TreeviewTooltip:
-    """悬停浮窗：当 Treeview 单元格文本较长时，鼠标悬停展示完整内容/路径。"""
-
-    def __init__(self, tree: ttk.Treeview, text_provider=None):
-        self.tree = tree
-        self.text_provider = text_provider
-        self.tip_window: tk.Toplevel | None = None
-        self.last_item: str | None = None
-        self.last_col: str | None = None
-        self.tree.bind("<Motion>", self._on_motion)
-        self.tree.bind("<Leave>", self._on_leave)
-
-    def _on_motion(self, event):
-        item = self.tree.identify_row(event.y)
-        column = self.tree.identify_column(event.x)
-        if not item or not column:
-            self._hide()
-            return
-        if item == self.last_item and column == self.last_col and self.tip_window:
-            return
-        self.last_item = item
-        self.last_col = column
-        try:
-            col_idx = int(column.replace("#", "")) - 1
-            values = self.tree.item(item, "values")
-            if not values or col_idx >= len(values):
-                self._hide()
-                return
-            if self.text_provider is not None:
-                provided = self.text_provider(item, col_idx)
-                text = str(provided).strip() if provided is not None else ""
-            else:
-                text = str(values[col_idx]).strip()
-        except Exception:
-            self._hide()
-            return
-        if not text:
-            self._hide()
-            return
-        if self.text_provider is not None or len(text) > 16 or "\\" in text or "/" in text or "\n" in text:
-            self._show(event.x_root + 15, event.y_root + 15, text)
-        else:
-            self._hide()
-
-    def _show(self, x: int, y: int, text: str):
-        self._hide()
-        self.tip_window = tw = tk.Toplevel(self.tree)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        tw.attributes("-topmost", True)
-        label = tk.Label(
-            tw,
-            text=text,
-            justify=tk.LEFT,
-            background="#2b2b2b",
-            foreground="#f0f0f0",
-            relief=tk.SOLID,
-            borderwidth=1,
-            font=("Segoe UI", 10),
-            padx=8,
-            pady=4,
-            wraplength=600,
-        )
-        label.pack(ipadx=1)
-
-    def _hide(self):
-        if self.tip_window:
-            try:
-                self.tip_window.destroy()
-            except Exception:
-                pass
-            self.tip_window = None
-        self.last_item = None
-        self.last_col = None
-
-    def _on_leave(self, _event):
-        self._hide()
-
-
-# ---------------- Theme & UI Style Configuration ----------------
-THEME = {
-    "bg": "#0D1117",
-    "card": "#161B22",
-    "card_alt": "#1C2128",
-    "card_border": "#30363D",
-    "input_bg": "#0D1117",
-    "accent": "#238636",
-    "accent_hover": "#2EA043",
-    "primary": "#1F6FEB",
-    "primary_hover": "#388BFD",
-    "danger": "#DA3633",
-    "danger_hover": "#F85149",
-    "secondary": "#21262D",
-    "secondary_hover": "#30363D",
-    "text_main": "#F0F6FC",
-    "text_muted": "#8B949E",
-    "text_subtle": "#6E7681",
-}
-
-
-def _apply_ttk_theme(root):
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
-    style.configure(
-        "Custom.Treeview",
-        background=THEME["card"],
-        foreground="#E6EDF3",
-        fieldbackground=THEME["card"],
-        rowheight=32,
-        font=("Microsoft YaHei UI", 11),
-        borderwidth=0,
-        relief="flat",
-    )
-    style.map(
-        "Custom.Treeview",
-        background=[("selected", "#1F6FEB")],
-        foreground=[("selected", "#FFFFFF")],
-    )
-    style.configure(
-        "Custom.Treeview.Heading",
-        background="#21262D",
-        foreground="#C9D1D9",
-        font=("Microsoft YaHei UI", 11, "bold"),
-        relief="flat",
-        padding=(8, 5),
-    )
-    style.map(
-        "Custom.Treeview.Heading",
-        background=[("active", "#30363D")],
-        foreground=[("active", "#58A6FF")],
-    )
-
-
-class GlossaryEditDialog(ctk.CTkToplevel):
-    def __init__(self, master, entry: GlossaryEntry | None = None):
-        super().__init__(master)
-        self.title("编辑词条")
-        self.geometry("560x490")
-        self.grab_set()
-        self.result: GlossaryEntry | None = None
-        self.entry = entry or GlossaryEntry("", "", "term")
-
-        self.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(self, text="韩文原文").grid(row=0, column=0, padx=12, pady=(18, 6), sticky="w")
-        self.ko_var = tk.StringVar(value=self.entry.ko)
-        ctk.CTkEntry(self, textvariable=self.ko_var).grid(row=0, column=1, padx=12, pady=(18, 6), sticky="ew")
-
-        ctk.CTkLabel(self, text="中文译名").grid(row=1, column=0, padx=12, pady=6, sticky="w")
-        self.zh_var = tk.StringVar(value=self.entry.zh)
-        ctk.CTkEntry(self, textvariable=self.zh_var).grid(row=1, column=1, padx=12, pady=6, sticky="ew")
-
-        ctk.CTkLabel(self, text="类型").grid(row=2, column=0, padx=12, pady=6, sticky="w")
-        self.kind_var = tk.StringVar(value=self.entry.kind)
-        ctk.CTkComboBox(
-            self,
-            values=["person", "person-nickname", "place", "org", "term", "title"],
-            variable=self.kind_var,
-            width=180,
-        ).grid(row=2, column=1, padx=12, pady=6, sticky="w")
-
-        ctk.CTkLabel(self, text="备注").grid(row=3, column=0, padx=12, pady=6, sticky="w")
-        self.note_var = tk.StringVar(value=self.entry.note)
-        ctk.CTkEntry(self, textvariable=self.note_var).grid(row=3, column=1, padx=12, pady=6, sticky="ew")
-
-        ctk.CTkLabel(self, text="可能翻译（半角逗号分隔）").grid(row=4, column=0, padx=12, pady=6, sticky="w")
-        self.alt_var = tk.StringVar(value=self.entry.alternatives)
-        ctk.CTkEntry(self, textvariable=self.alt_var).grid(row=4, column=1, padx=12, pady=6, sticky="ew")
-
-        self.confirmed_var = tk.BooleanVar(value=self.entry.confirmed)
-        ctk.CTkCheckBox(self, text="已人工确认", variable=self.confirmed_var).grid(
-            row=5, column=0, columnspan=2, padx=12, pady=12, sticky="w"
-        )
-
-        self.replace_short_var = tk.BooleanVar(value=self.entry.replace_short)
-        ctk.CTkCheckBox(
-            self,
-            text="替换短称（可能译法中的简称也替换为全名，如“范镇”→“崔范镇”）",
-            variable=self.replace_short_var,
-        ).grid(row=6, column=0, columnspan=2, padx=12, pady=6, sticky="w")
-
-        ctk.CTkButton(self, text="确定", command=self._ok).grid(
-            row=7, column=0, columnspan=2, pady=16
-        )
-
-    def _ok(self):
-        ko = self.ko_var.get().strip()
-        zh = self.zh_var.get().strip()
-        alternatives = self.alt_var.get().strip()
-        if not ko:
-            messagebox.showwarning("提示", "韩文原文不能为空", parent=self)
-            return
-        if not zh:
-            first = next((x.strip() for x in alternatives.split(",") if x.strip()), "")
-            if first:
-                zh = first
-            else:
-                messagebox.showwarning("提示", "中文译名不能为空（可先填写“可能翻译”，自动取第一个作为译名）", parent=self)
-                return
-        short = [x.strip() for x in alternatives.split(",") if x.strip() and len(x.strip()) < 3]
-        if short:
-            if not messagebox.askyesno(
-                "提示",
-                "以下“可能翻译”过短（1-2 字），回传时容易被误替换：\n"
-                + "、".join(short)
-                + "\n\n建议写得更完整（例如补上姓氏）后再确认。\n仍要保存吗？",
-                parent=self,
-            ):
-                return
-        self.result = GlossaryEntry(
-            ko=ko,
-            zh=zh,
-            kind=self.kind_var.get().strip() or "term",
-            note=self.note_var.get().strip(),
-            confirmed=self.confirmed_var.get(),
-            alternatives=alternatives,
-            replace_short=self.replace_short_var.get(),
-        )
-        self.destroy()
-
-
-class SanitizerRuleDialog(ctk.CTkToplevel):
-    """导出清洗器规则配置弹窗：内置规则开关 + 自定义正则/文本替换规则 + 实时预览。"""
-
-    def __init__(self, master, config: SanitizerConfig, on_apply):
-        super().__init__(master)
-        self.title("自定义清洗规则")
-        self.geometry("800x620")
-        self.minsize(720, 520)
-        self.config = config
-        self.on_apply = on_apply
-        self.transient(master)
-        self.grab_set()
-
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
-
-        ctk.CTkLabel(
-            self, text="内置规则", font=ctk.CTkFont(size=14, weight="bold")
-        ).grid(row=0, column=0, padx=12, pady=(14, 4), sticky="w")
-        self.strip_numbers_var = tk.BooleanVar(value=config.strip_numbers)
-        self.strip_json_var = tk.BooleanVar(value=config.strip_json_residue)
-        self.fix_quotes_var = tk.BooleanVar(value=config.fix_quotes)
-        self.polish_punct_var = tk.BooleanVar(value=config.polish_punctuation)
-        builtin = ctk.CTkFrame(self, fg_color="transparent")
-        builtin.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
-        ctk.CTkCheckBox(
-            builtin, text="自动清除段首段落编号 [1] / 1. 等", variable=self.strip_numbers_var
-        ).grid(row=0, column=0, padx=(0, 18), sticky="w")
-        ctk.CTkCheckBox(
-            builtin, text='自动清除 JSON 结构残渣 {"paragraphs": 等', variable=self.strip_json_var
-        ).grid(row=1, column=0, padx=(0, 18), sticky="w")
-        ctk.CTkCheckBox(
-            builtin, text='自动修正外层未剥离半角引号 "', variable=self.fix_quotes_var
-        ).grid(row=2, column=0, padx=(0, 18), sticky="w")
-        ctk.CTkCheckBox(
-            builtin, text="标点美化（... → ……、重复感叹/问号收敛）", variable=self.polish_punct_var
-        ).grid(row=3, column=0, padx=(0, 18), sticky="w")
-
-        rules_header = ctk.CTkFrame(self, fg_color="transparent")
-        rules_header.grid(row=2, column=0, padx=12, pady=(6, 4), sticky="ew")
-        rules_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            rules_header, text="自定义规则", font=ctk.CTkFont(size=14, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
-            rules_header, text="＋ 添加", width=70, command=self._add_rule
-        ).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(
-            rules_header, text="✎ 编辑", width=70,
-            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
-            border_width=1, border_color=THEME["card_border"], command=self._edit_rule,
-        ).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(
-            rules_header, text="✕ 删除", width=70,
-            fg_color=THEME["secondary"], hover_color=THEME["danger"],
-            border_width=1, border_color=THEME["card_border"], command=self._delete_rule,
-        ).grid(row=0, column=3, padx=4)
-
-        tree_frame = ctk.CTkFrame(self)
-        tree_frame.grid(row=3, column=0, padx=12, pady=(0, 6), sticky="nsew")
-        tree_frame.grid_columnconfigure(0, weight=1)
-        tree_frame.grid_rowconfigure(0, weight=1)
-        self.rules_tree = ttk.Treeview(
-            tree_frame,
-            columns=("type", "pattern", "replace", "enabled"),
-            show="headings",
-            height=8,
-            style="Custom.Treeview",
-        )
-        self.rules_tree.heading("type", text="类型")
-        self.rules_tree.heading("pattern", text="查找内容")
-        self.rules_tree.heading("replace", text="替换为")
-        self.rules_tree.heading("enabled", text="启用")
-        self.rules_tree.column("type", width=80, anchor="center")
-        self.rules_tree.column("pattern", width=360, anchor="w")
-        self.rules_tree.column("replace", width=180, anchor="w")
-        self.rules_tree.column("enabled", width=60, anchor="center")
-        self.rules_tree.grid(row=0, column=0, sticky="nsew")
-        rules_scroll = ctk.CTkScrollbar(tree_frame, command=self.rules_tree.yview)
-        rules_scroll.grid(row=0, column=1, sticky="ns")
-        self.rules_tree.configure(yscrollcommand=rules_scroll.set)
-        self.rules_tree.bind("<Double-1>", lambda _e: self._edit_rule())
-        self._refresh_rules()
-
-        preview_frame = ctk.CTkFrame(self, fg_color="transparent")
-        preview_frame.grid(row=4, column=0, padx=12, pady=(0, 6), sticky="ew")
-        preview_frame.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(preview_frame, text="测试文本").grid(row=0, column=0, padx=(4, 8), sticky="w")
-        self.test_text_var = tk.StringVar(value="[1] 这是一个测试段落…")
-        ctk.CTkEntry(preview_frame, textvariable=self.test_text_var).grid(
-            row=0, column=1, padx=4, sticky="ew"
-        )
-        ctk.CTkButton(preview_frame, text="▶ 测试", width=70, command=self._run_test).grid(
-            row=0, column=2, padx=4
-        )
-        self.preview_result_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            preview_frame, textvariable=self.preview_result_var, anchor="w",
-            wraplength=620, justify="left",
-        ).grid(row=1, column=0, columnspan=3, padx=4, pady=(4, 0), sticky="w")
-        self._run_test()
-
-        bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="e")
-        ctk.CTkButton(bottom, text="取消", width=90, command=self.destroy).grid(row=0, column=0, padx=6)
-        ctk.CTkButton(
-            bottom, text="确定", width=90,
-            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._ok,
-        ).grid(row=0, column=1, padx=6)
-
-    def _refresh_rules(self):
-        for item in self.rules_tree.get_children():
-            self.rules_tree.delete(item)
-        for i, rule in enumerate(self.config.custom_rules):
-            self.rules_tree.insert(
-                "",
-                "end",
-                iid=str(i),
-                values=(
-                    "正则" if rule.is_regex else "文本",
-                    rule.pattern,
-                    rule.replace,
-                    "✓" if rule.enabled else "",
-                ),
-            )
-
-    def _selected_index(self) -> int | None:
-        sel = self.rules_tree.selection()
-        if not sel:
-            return None
-        return int(sel[0])
-
-    def _add_rule(self):
-        self._edit_rule(index=None)
-
-    def _edit_rule(self, index: int | None = None):
-        if index is None:
-            index = self._selected_index()
-        rule = self.config.custom_rules[index] if index is not None else CustomRule("")
-        dialog = RuleEditDialog(self, rule)
-        self.wait_window(dialog)
-        if not dialog.result:
-            return
-        if index is None:
-            self.config.custom_rules.append(dialog.result)
-        else:
-            self.config.custom_rules[index] = dialog.result
-        self._refresh_rules()
-        self._run_test()
-
-    def _delete_rule(self):
-        index = self._selected_index()
-        if index is None:
-            return
-        del self.config.custom_rules[index]
-        self._refresh_rules()
-        self._run_test()
-
-    def _run_test(self):
-        from .sanitizer import ExportSanitizer
-
-        # 用当前弹窗的开关即时构建一个临时配置做预览。
-        temp = SanitizerConfig(
-            enabled=True,
-            strip_numbers=self.strip_numbers_var.get(),
-            strip_json_residue=self.strip_json_var.get(),
-            fix_quotes=self.fix_quotes_var.get(),
-            polish_punctuation=self.polish_punct_var.get(),
-            custom_rules=list(self.config.custom_rules),
-        )
-        result = ExportSanitizer(temp).clean_paragraph(self.test_text_var.get())
-        self.preview_result_var.set(f"清洗后：{result}")
-
-    def _ok(self):
-        self.config.strip_numbers = self.strip_numbers_var.get()
-        self.config.strip_json_residue = self.strip_json_var.get()
-        self.config.fix_quotes = self.fix_quotes_var.get()
-        self.config.polish_punctuation = self.polish_punct_var.get()
-        self.on_apply()
-        self.destroy()
-
-
-class RuleEditDialog(ctk.CTkToplevel):
-    """单条自定义规则的编辑弹窗。"""
-
-    def __init__(self, master, rule: CustomRule):
-        super().__init__(master)
-        self.title("编辑规则")
-        self.geometry("520x260")
-        self.transient(master)
-        self.grab_set()
-        self.result: CustomRule | None = None
-
-        self.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(self, text="模式类型").grid(row=0, column=0, padx=12, pady=(16, 4), sticky="w")
-        self.is_regex_var = tk.BooleanVar(value=rule.is_regex)
-        ctk.CTkCheckBox(
-            self, text="使用正则表达式（否则按纯文本替换）", variable=self.is_regex_var
-        ).grid(row=0, column=1, padx=12, pady=(16, 4), sticky="w")
-        ctk.CTkLabel(self, text="查找内容").grid(row=1, column=0, padx=12, pady=4, sticky="w")
-        self.pattern_var = tk.StringVar(value=rule.pattern)
-        ctk.CTkEntry(self, textvariable=self.pattern_var).grid(row=1, column=1, padx=12, pady=4, sticky="ew")
-        ctk.CTkLabel(self, text="替换为（可空）").grid(row=2, column=0, padx=12, pady=4, sticky="w")
-        self.replace_var = tk.StringVar(value=rule.replace)
-        ctk.CTkEntry(self, textvariable=self.replace_var).grid(row=2, column=1, padx=12, pady=4, sticky="ew")
-        self.enabled_var = tk.BooleanVar(value=rule.enabled)
-        ctk.CTkCheckBox(self, text="启用该规则", variable=self.enabled_var).grid(
-            row=3, column=1, padx=12, pady=4, sticky="w"
-        )
-        bottom = ctk.CTkFrame(self, fg_color="transparent")
-        bottom.grid(row=4, column=0, columnspan=2, padx=12, pady=(10, 12), sticky="e")
-        ctk.CTkButton(bottom, text="取消", width=80, command=self.destroy).grid(row=0, column=0, padx=6)
-        ctk.CTkButton(
-            bottom, text="确定", width=80,
-            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._ok,
-        ).grid(row=0, column=1, padx=6)
-
-    def _ok(self):
-        pattern = self.pattern_var.get().strip()
-        if not pattern:
-            messagebox.showwarning("提示", "查找内容不能为空", parent=self)
-            return
-        self.result = CustomRule(
-            pattern=pattern,
-            replace=self.replace_var.get(),
-            is_regex=self.is_regex_var.get(),
-            enabled=self.enabled_var.get(),
-        )
-        self.destroy()
-
-
-class FailedChunkEditorDialog(ctk.CTkToplevel):
-    """失败块查看 / 手动编辑弹窗：列出多卷存档里的失败块，展示原文，可手动填译文或切模型翻译。"""
-
-    def __init__(self, master, files: list[Path], config: AppConfig, glossary: Glossary):
-        super().__init__(master)
-        self.master = master
-        self.config = config
-        self.glossary = glossary
-        self.files = list(files)
-        self.items: list[FailedChunk] = []
-        self.current: FailedChunk | None = None
-        self._busy = False
-
-        self.title("失败块查看 / 手动编辑")
-        self.geometry("980x640")
-        self.minsize(860, 560)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
-
-        ctk.CTkLabel(
-            self,
-            text="失败块查看 / 手动编辑（原文已持久化在翻译存档里，可直接补翻）",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(14, 6), sticky="w")
-
-        # 模型配置行：可手动切换模型去翻译对应原文。
-        cfg_frame = ctk.CTkFrame(self, fg_color="transparent")
-        cfg_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
-        cfg_frame.grid_columnconfigure(1, weight=1)
-        cfg_frame.grid_columnconfigure(3, weight=1)
-        ctk.CTkLabel(cfg_frame, text="Base URL").grid(row=0, column=0, padx=(4, 6), sticky="w")
-        self.base_url_var = tk.StringVar(value=config.base_url)
-        ctk.CTkEntry(cfg_frame, textvariable=self.base_url_var, width=240).grid(row=0, column=1, padx=4, sticky="w")
-        ctk.CTkLabel(cfg_frame, text="API Key").grid(row=0, column=2, padx=(14, 6), sticky="w")
-        self.api_key_var = tk.StringVar(value=config.api_key)
-        ctk.CTkEntry(cfg_frame, textvariable=self.api_key_var, width=180, show="*").grid(row=0, column=3, padx=4, sticky="w")
-        ctk.CTkLabel(cfg_frame, text="Model").grid(row=0, column=4, padx=(14, 6), sticky="w")
-        self.model_var = tk.StringVar(value=config.model)
-        ctk.CTkEntry(cfg_frame, textvariable=self.model_var, width=200).grid(row=0, column=5, padx=4, sticky="w")
-        self.translate_btn = ctk.CTkButton(
-            cfg_frame, text="🔁 用所选模型翻译", width=140,
-            fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._translate_with_model,
-        )
-        self.translate_btn.grid(row=0, column=6, padx=(12, 4))
-
-        # 主区域：左列表 + 右详情。
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=2)
-        body.grid_rowconfigure(0, weight=1)
-
-        left = ctk.CTkFrame(body)
-        left.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
-        left.grid_rowconfigure(0, weight=1)
-        cols = ("archive", "chunk", "chapter", "flag", "error")
-        self.tree = ttk.Treeview(
-            left, columns=cols, show="headings", style="Custom.Treeview",
-        )
-        self.tree.heading("archive", text="存档")
-        self.tree.heading("chunk", text="块 ID")
-        self.tree.heading("chapter", text="章名")
-        self.tree.heading("flag", text="标记")
-        self.tree.heading("error", text="原因")
-        self.tree.column("archive", width=180, anchor="w")
-        self.tree.column("chunk", width=150, anchor="w")
-        self.tree.column("chapter", width=120, anchor="w")
-        self.tree.column("flag", width=70, anchor="center")
-        self.tree.column("error", width=200, anchor="w")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scroll = ctk.CTkScrollbar(left, command=self.tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
-
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(2, weight=1)
-        ctk.CTkLabel(right, text="原文（韩文）", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, padx=4, sticky="w")
-        self.src_box = ctk.CTkTextbox(right, height=170)
-        self.src_box.grid(row=1, column=0, padx=4, pady=(2, 8), sticky="nsew")
-        self.src_box.configure(state="disabled")
-        ctk.CTkLabel(right, text="译文（每行一段，可手动编辑或先用模型翻译）", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=4, sticky="sw")
-        self.out_box = ctk.CTkTextbox(right, height=170)
-        self.out_box.grid(row=3, column=0, padx=4, pady=(2, 8), sticky="nsew")
-        self.error_label = ctk.CTkLabel(right, text="", wraplength=560, justify="left", anchor="w")
-        self.error_label.grid(row=4, column=0, padx=4, sticky="w")
-        self.status_var = tk.StringVar(value="")
-        self.status_label = ctk.CTkLabel(right, textvariable=self.status_var, anchor="w")
-        self.status_label.grid(row=5, column=0, padx=4, pady=(2, 0), sticky="w")
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
-        ctk.CTkButton(btn_frame, text="💾 保存译文", width=130, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._save_translation).grid(row=0, column=0, padx=4)
-        ctk.CTkButton(btn_frame, text="🗑 放弃/关闭", width=120, command=self.destroy).grid(row=0, column=1, padx=4)
-        ctk.CTkLabel(btn_frame, text="提示：保存后写入该存档 completed 并从失败列表移除，可继续“修正并输出”。").grid(row=0, column=2, padx=16, sticky="w")
-
-        self._load_items()
-
-    # ---------------- 加载与列表 ----------------
-    def _load_items(self):
-        self.items = []
-        for f in self.files:
-            try:
-                self.items.extend(load_failed_chunks(f, self.config))
-            except Exception as exc:  # noqa: BLE001
-                self.master.log(f"读取失败：{Path(f).name}：{exc}")
-        self._refresh_tree()
-        if not self.items:
-            self.status_var.set("所选存档没有失败块")
-        else:
-            self.status_var.set(f"共 {len(self.items)} 个失败块")
-
-    def _refresh_tree(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for idx, item in enumerate(self.items):
-            self.tree.insert(
-                "", "end", iid=str(idx),
-                values=(
-                    Path(item.archive).name,
-                    item.chunk_id,
-                    item.chapter_title or "-",
-                    "缺原文" if item.missing else "",
-                    item.error[:50],
-                ),
-            )
-
-    def _on_select(self, _evt=None):
-        sel = self.tree.selection()
-        if not sel:
-            return
-        item = self.items[int(sel[0])]
-        self.current = item
-        self.src_box.configure(state="normal")
-        self.src_box.delete("1.0", "end")
-        self.src_box.insert("end", "\n\n".join(item.paragraphs) if item.paragraphs else "（该失败块未持久化原文，需核对原书）")
-        self.src_box.configure(state="disabled")
-        self.out_box.delete("1.0", "end")
-        err = item.error or ""
-        self.error_label.configure(text=f"块 ID：{item.chunk_id}    失败原因：{err}")
-
-    # ---------------- 用所选模型翻译 ----------------
-    def _translate_with_model(self):
-        item = self.current
-        if item is None:
-            messagebox.showwarning("提示", "请先在左侧选择一个失败块", parent=self)
-            return
-        if not item.paragraphs:
-            messagebox.showwarning("提示", "该失败块没有持久化原文，无法用模型翻译", parent=self)
-            return
-        if not self.model_var.get().strip():
-            messagebox.showwarning("提示", "请先填写模型名", parent=self)
-            return
-        if self._busy:
-            return
-        self._busy = True
-        self.translate_btn.configure(state="disabled")
-        self.status_var.set("正在用所选模型翻译…")
-        threading.Thread(target=self._do_translate, args=(item,), daemon=True).start()
-
-    def _do_translate(self, item: FailedChunk):
-        try:
-            config = AppConfig(
-                base_url=self.base_url_var.get().strip(),
-                api_key=self.api_key_var.get().strip(),
-                model=self.model_var.get().strip(),
-            )
-            llm = LLMClient(config)
-            glossary_text = self.glossary.prompt_text() if self.glossary else ""
-            system = (
-                "你是一名资深的韩语小说中文译者。请把用户提供的韩语小说内容翻译成简体中文。\n"
-                "要求：忠实原文，不增删情节，保留段落顺序与语气。\n"
-                f"【专有名词词表】\n{glossary_text or '（无）'}\n\n"
-                '【输出格式】只输出一个 JSON 对象：{"paragraphs": ["译文段落1", "译文段落2", ...]}，'
-                "译文数组的段落数量必须与原文完全一致，顺序也必须一致。"
-            )
-            numbered = "\n".join(
-                f"[{i}] {p}" for i, p in enumerate(item.paragraphs, start=1)
-            )
-            user = (
-                f"章节：{item.chapter_title}\n原文段落数量：{len(item.paragraphs)}\n"
-                "请把下面每个编号段落翻译成中文，并按编号顺序返回相同数量的译文段落。\n\n"
-                f"{numbered}"
-            )
-            raw = llm.chat(
-                [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                json_mode=True,
-            )
-            payload = extract_json(raw)
-            paras = parse_paragraphs_from_payload(payload)
-            paras = reconcile_paragraphs(paras, len(item.paragraphs))
-            paras = [self.glossary.apply_replacements(p) if self.glossary else p for p in paras]
-            self.after(0, lambda: self._on_translate_done(paras))
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            self.after(0, lambda: self._on_translate_error(message))
-
-    def _on_translate_done(self, paras: list[str]):
-        self._busy = False
-        self.translate_btn.configure(state="normal")
-        self.out_box.delete("1.0", "end")
-        self.out_box.insert("end", "\n".join(paras))
-        self.status_var.set("翻译完成，请人工核对后保存")
-
-    def _on_translate_error(self, message: str):
-        self._busy = False
-        self.translate_btn.configure(state="normal")
-        self.status_var.set("翻译失败")
-        messagebox.showerror("翻译失败", message, parent=self)
-
-    # ---------------- 保存手动译文 ----------------
-    def _save_translation(self):
-        item = self.current
-        if item is None:
-            messagebox.showwarning("提示", "请先在左侧选择一个失败块", parent=self)
-            return
-        text = self.out_box.get("1.0", "end")
-        lines = [x.strip() for x in text.split("\n") if x.strip()]
-        if not lines:
-            messagebox.showwarning("提示", "译文不能为空", parent=self)
-            return
-        if item.paragraphs:
-            paras = reconcile_paragraphs(lines, len(item.paragraphs))
-        else:
-            paras = lines
-        if self.glossary:
-            paras = [self.glossary.apply_replacements(p) for p in paras]
-        try:
-            save_manual_translation(item.archive, item.chunk_id, paras)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("错误", f"保存失败：{exc}", parent=self)
-            return
-        self.master.log(f"手动补翻成功：{Path(item.archive).name} {item.chunk_id}（{len(paras)} 段）")
-        self.items = [
-            x for x in self.items
-            if not (Path(x.archive) == Path(item.archive) and x.chunk_id == item.chunk_id)
-        ]
-        self._refresh_tree()
-        self.current = None
-        self.src_box.configure(state="normal")
-        self.src_box.delete("1.0", "end")
-        self.src_box.configure(state="disabled")
-        self.out_box.delete("1.0", "end")
-        self.error_label.configure(text="")
-        self.status_var.set(f"已保存，剩余 {len(self.items)} 个失败块")
-
-
-class PerspectiveFailedEditorDialog(ctk.CTkToplevel):
-    """视角转换失败块查看器：每个文本节点作为一个可编辑分段保存。"""
-
-    def __init__(
-        self,
-        master,
-        state_path: Path,
-        config: AppConfig,
-        glossary: Glossary,
-        options: PerspectiveOptions,
-    ):
-        super().__init__(master)
-        self.master = master
-        self.state_path = Path(state_path)
-        self.config = config
-        self.glossary = glossary
-        self.options = options
-        self.items: list[PerspectiveFailedBlock] = []
-        self.current: PerspectiveFailedBlock | None = None
-        self._busy = False
-        self._single_cancel_event = threading.Event()
-        self._batch_active = False
-        self._batch_cancel_event = threading.Event()
-        self._close_requested = False
-
-        self.title("视角转换失败块")
-        self.geometry("1000x680")
-        self.minsize(860, 580)
-        self.protocol("WM_DELETE_WINDOW", self._close_dialog)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
-
-        ctk.CTkLabel(
-            self,
-            text="视角转换失败块（原文已保存，可切换模型或手动编辑后写回）",
-            font=ctk.CTkFont(size=15, weight="bold"),
-        ).grid(row=0, column=0, padx=12, pady=(14, 6), sticky="w")
-
-        cfg = ctk.CTkFrame(self, fg_color="transparent")
-        cfg.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
-        for column in (1, 3, 5):
-            cfg.grid_columnconfigure(column, weight=1)
-        ctk.CTkLabel(cfg, text="Base URL").grid(row=0, column=0, padx=(4, 6), sticky="w")
-        self.base_url_var = tk.StringVar(value=config.base_url)
-        ctk.CTkEntry(cfg, textvariable=self.base_url_var, width=220).grid(row=0, column=1, padx=4, sticky="ew")
-        ctk.CTkLabel(cfg, text="API Key").grid(row=0, column=2, padx=(12, 6), sticky="w")
-        self.api_key_var = tk.StringVar(value=config.api_key)
-        ctk.CTkEntry(cfg, textvariable=self.api_key_var, width=180, show="*").grid(row=0, column=3, padx=4, sticky="ew")
-        ctk.CTkLabel(cfg, text="Model").grid(row=0, column=4, padx=(12, 6), sticky="w")
-        self.model_var = tk.StringVar(value=config.model)
-        ctk.CTkEntry(cfg, textvariable=self.model_var, width=180).grid(row=0, column=5, padx=4, sticky="ew")
-        self.translate_btn = ctk.CTkButton(
-            cfg,
-            text="🔁 用所选模型改写",
-            width=140,
-            fg_color=THEME["primary"],
-            hover_color=THEME["primary_hover"],
-            command=self._translate_with_model,
-        )
-        self.translate_btn.grid(row=0, column=6, padx=(12, 4))
-        self.single_stop_btn = ctk.CTkButton(
-            cfg,
-            text="⏹ 停止当前",
-            width=100,
-            fg_color=THEME["danger"],
-            hover_color=THEME["danger_hover"],
-            command=self._stop_single_retry,
-        )
-        self.single_stop_btn.grid(row=0, column=7, padx=4)
-        self.single_stop_btn.configure(state="disabled")
-
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.grid(row=2, column=0, padx=12, pady=(0, 8), sticky="nsew")
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=2)
-        body.grid_rowconfigure(0, weight=1)
-
-        left = ctk.CTkFrame(body)
-        left.grid(row=0, column=0, padx=(0, 10), sticky="nsew")
-        left.grid_rowconfigure(0, weight=1)
-        tree = ttk.Treeview(
-            left,
-            columns=("block", "file", "kind", "error"),
-            show="headings",
-            style="Custom.Treeview",
-        )
-        for column, title, width in (
-            ("block", "块 ID", 170),
-            ("file", "正文文件", 150),
-            ("kind", "类型", 95),
-            ("error", "原因", 230),
-        ):
-            tree.heading(column, text=title)
-            tree.column(column, width=width, anchor="w")
-        tree.grid(row=0, column=0, sticky="nsew")
-        scroll = ctk.CTkScrollbar(left, command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
-        tree.configure(yscrollcommand=scroll.set)
-        tree.bind("<<TreeviewSelect>>", self._on_select)
-        self.tree = tree
-
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
-        right.grid_rowconfigure(3, weight=1)
-        ctk.CTkLabel(right, text="原文分段", font=ctk.CTkFont(size=13, weight="bold")).grid(row=0, column=0, padx=4, sticky="w")
-        self.source_box = ctk.CTkTextbox(right, height=180)
-        self.source_box.grid(row=1, column=0, padx=4, pady=(2, 8), sticky="nsew")
-        self.source_box.configure(state="disabled")
-        ctk.CTkLabel(right, text="第三人称译文（保留分段标记，可直接编辑）", font=ctk.CTkFont(size=13, weight="bold")).grid(row=2, column=0, padx=4, sticky="w")
-        self.output_box = ctk.CTkTextbox(right, height=180)
-        self.output_box.grid(row=3, column=0, padx=4, pady=(2, 8), sticky="nsew")
-        self.error_label = ctk.CTkLabel(right, text="", wraplength=580, justify="left", anchor="w")
-        self.error_label.grid(row=4, column=0, padx=4, sticky="w")
-        self.status_var = tk.StringVar(value="")
-        ctk.CTkLabel(right, textvariable=self.status_var, anchor="w").grid(row=5, column=0, padx=4, pady=(2, 0), sticky="w")
-
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
-        self.save_btn = ctk.CTkButton(
-            buttons,
-            text="💾 保存当前块",
-            width=130,
-            fg_color=THEME["primary"],
-            hover_color=THEME["primary_hover"],
-            command=self._save_translation,
-        )
-        self.save_btn.grid(row=0, column=0, padx=4)
-        self.batch_btn = ctk.CTkButton(
-            buttons,
-            text="▶ 批量重试失败块",
-            width=145,
-            fg_color=THEME["primary"],
-            hover_color=THEME["primary_hover"],
-            command=self._batch_retry_failed,
-        )
-        self.batch_btn.grid(row=0, column=1, padx=4)
-        self.batch_stop_btn = ctk.CTkButton(
-            buttons,
-            text="⏹ 停止批量",
-            width=100,
-            fg_color=THEME["danger"],
-            hover_color=THEME["danger_hover"],
-            command=self._stop_batch_retry,
-        )
-        self.batch_stop_btn.grid(row=0, column=2, padx=4)
-        self.batch_stop_btn.configure(state="disabled")
-        self.close_btn = ctk.CTkButton(buttons, text="关闭", width=90, command=self._close_dialog)
-        self.close_btn.grid(row=0, column=3, padx=4)
-        self.batch_progress = ctk.CTkProgressBar(
-            buttons,
-            width=150,
-            height=8,
-            progress_color=THEME["primary"],
-        )
-        self.batch_progress.set(0)
-        self.batch_progress.grid(row=0, column=4, padx=(16, 6))
-        self.batch_status_var = tk.StringVar(value="")
-        ctk.CTkLabel(
-            buttons,
-            textvariable=self.batch_status_var,
-            text_color=THEME["text_muted"],
-            anchor="w",
-        ).grid(row=0, column=5, padx=4, sticky="w")
-
-        self._load_items()
-
-    @staticmethod
-    def _format_segments(segments: list[str]) -> str:
-        return "\n\n".join(
-            f"【分段 {index + 1}】\n{segment}"
-            for index, segment in enumerate(segments)
-        )
-
-    @staticmethod
-    def _parse_segments(text: str, count: int) -> list[str]:
-        marker = re.compile(r"(?:^|\n)【分段\s*(\d+)】\s*\n")
-        matches = list(marker.finditer(text))
-        if count == 1 and not matches:
-            value = text.strip()
-            if not value:
-                raise ValueError("译文不能为空")
-            return [value]
-        if len(matches) != count or [int(m.group(1)) for m in matches] != list(range(1, count + 1)):
-            raise ValueError(f"请保留并按顺序填写全部 {count} 个“【分段 N】”标记")
-        values: list[str] = []
-        for index, match in enumerate(matches):
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            value = text[match.end():end].strip()
-            if not value:
-                raise ValueError(f"分段 {index + 1} 的译文不能为空")
-            values.append(value)
-        return values
-
-    def _load_items(self):
-        try:
-            self.items = load_failed_perspective_blocks(self.state_path)
-        except Exception as exc:  # noqa: BLE001
-            self.items = []
-            self.status_var.set(f"读取失败：{exc}")
-        self._refresh_tree()
-        if self.items:
-            self.status_var.set(f"共 {len(self.items)} 个失败块")
-        elif not self.status_var.get():
-            self.status_var.set("当前没有失败块")
-
-    def _refresh_tree(self, selected_block_id: str | None = None):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for index, item in enumerate(self.items):
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                values=(item.block_id, Path(item.file).name, item.classification, item.error[:80]),
-            )
-        if selected_block_id:
-            for index, item in enumerate(self.items):
-                if item.block_id == selected_block_id:
-                    iid = str(index)
-                    self.tree.selection_set(iid)
-                    self.tree.see(iid)
-                    break
-
-    def _on_select(self, _event=None):
-        selection = self.tree.selection()
-        if not selection:
-            return
-        item = self.items[int(selection[0])]
-        self.current = item
-        source = self._format_segments(item.source_segments)
-        translated = item.translated_segments or [""] * len(item.source_segments)
-        self.source_box.configure(state="normal")
-        self.source_box.delete("1.0", "end")
-        self.source_box.insert("end", source)
-        self.source_box.configure(state="disabled")
-        self.output_box.delete("1.0", "end")
-        self.output_box.insert("end", self._format_segments(translated))
-        self.error_label.configure(text=f"块 ID：{item.block_id}    失败原因：{item.error}")
-
-    def _translate_with_model(self):
-        item = self.current
-        if item is None:
-            messagebox.showwarning("提示", "请先选择一个失败块", parent=self)
-            return
-        if self._busy:
-            return
-        base_url = self.base_url_var.get().strip()
-        api_key = self.api_key_var.get().strip()
-        model = self.model_var.get().strip()
-        if not base_url or not model:
-            messagebox.showwarning("提示", "Base URL 和 Model 不能为空", parent=self)
-            return
-        self._busy = True
-        self._close_requested = False
-        self._single_cancel_event.clear()
-        self.translate_btn.configure(state="disabled")
-        self.single_stop_btn.configure(state="normal")
-        self.batch_btn.configure(state="disabled")
-        self.save_btn.configure(state="disabled")
-        self.status_var.set("正在用所选模型改写…")
-        threading.Thread(
-            target=self._translate_worker,
-            args=(item, base_url, api_key, model),
-            daemon=True,
-        ).start()
-
-    def _translate_worker(self, item: PerspectiveFailedBlock, base_url: str, api_key: str, model: str):
-        try:
-            data = self.config.to_dict()
-            data.update({"base_url": base_url, "api_key": api_key, "model": model})
-            llm = LLMClient(AppConfig.from_dict(data))
-            block = PerspectiveBlock(
-                id=item.block_id,
-                file=item.file,
-                index=0,
-                source_segments=item.source_segments,
-                source_text="".join(item.source_segments),
-                classification=item.classification,
-            )
-            translated = rewrite_blocks(
-                llm,
-                self.options,
-                self.glossary,
-                [block],
-                cancel_event=self._single_cancel_event,
-            )[item.block_id]
-            self.after(0, lambda: self._on_model_done(translated))
-        except LLMCancelled:
-            self.after(0, self._on_model_cancelled)
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            self.after(0, lambda: self._on_model_error(message))
-
-    def _on_model_cancelled(self):
-        self._busy = False
-        self.single_stop_btn.configure(state="disabled")
-        self.translate_btn.configure(state="normal")
-        self.batch_btn.configure(state="normal")
-        self.save_btn.configure(state="normal")
-        self.status_var.set("当前块请求已停止，原失败块仍保留")
-        if self._close_requested:
-            self.destroy()
-
-    def _batch_retry_failed(self):
-        if self._busy:
-            return
-        try:
-            items = load_failed_perspective_blocks(self.state_path)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("读取失败块失败", str(exc), parent=self)
-            return
-        if not items:
-            self.items = []
-            self._refresh_tree()
-            self.batch_progress.set(1)
-            self.batch_status_var.set("没有待重试的失败块")
-            self.status_var.set("当前没有失败块")
-            return
-
-        base_url = self.base_url_var.get().strip()
-        api_key = self.api_key_var.get().strip()
-        model = self.model_var.get().strip()
-        if not base_url or not model:
-            messagebox.showwarning("提示", "Base URL 和 Model 不能为空", parent=self)
-            return
-
-        self.items = items
-        self._refresh_tree(self.current.block_id if self.current else None)
-        self._busy = True
-        self._batch_active = True
-        self._close_requested = False
-        self._batch_cancel_event.clear()
-        self.translate_btn.configure(state="disabled")
-        self.batch_btn.configure(state="disabled")
-        self.batch_stop_btn.configure(state="normal")
-        self.save_btn.configure(state="disabled")
-        self.close_btn.configure(state="disabled")
-        self.batch_progress.set(0)
-        self.batch_status_var.set(f"批量重试：0/{len(items)}")
-        self.status_var.set(f"批量重试失败块：0/{len(items)}")
-        threading.Thread(
-            target=self._batch_retry_worker,
-            args=(items, base_url, api_key, model),
-            daemon=True,
-        ).start()
-
-    def _batch_retry_worker(
-        self,
-        items: list[PerspectiveFailedBlock],
-        base_url: str,
-        api_key: str,
-        model: str,
-    ):
-        completed = 0
-        failed = 0
-        processed = 0
-        cancelled = False
-        try:
-            data = self.config.to_dict()
-            data.update({"base_url": base_url, "api_key": api_key, "model": model})
-            llm = LLMClient(AppConfig.from_dict(data))
-            for item in items:
-                if self._batch_cancel_event.is_set():
-                    cancelled = True
-                    break
-                block = PerspectiveBlock(
-                    id=item.block_id,
-                    file=item.file,
-                    index=0,
-                    source_segments=item.source_segments,
-                    source_text="".join(item.source_segments),
-                    classification=item.classification,
-                )
-                try:
-                    translated = rewrite_blocks(
-                        llm,
-                        self.options,
-                        self.glossary,
-                        [block],
-                        cancel_event=self._batch_cancel_event,
-                    )[item.block_id]
-                    if self._batch_cancel_event.is_set():
-                        cancelled = True
-                        break
-                    save_manual_perspective_translation(
-                        self.state_path,
-                        item.block_id,
-                        translated,
-                    )
-                    completed += 1
-                    success = True
-                    error = ""
-                except Exception as exc:  # noqa: BLE001
-                    if self._batch_cancel_event.is_set():
-                        cancelled = True
-                        break
-                    error = str(exc)
-                    save_perspective_failure(self.state_path, item.block_id, error)
-                    failed += 1
-                    success = False
-                processed += 1
-                self.after(
-                    0,
-                    lambda block_id=item.block_id, ok=success, message=error, current=processed, total=len(items), good=completed, bad=failed: self._on_batch_item_done(
-                        block_id, ok, message, current, total, good, bad
-                    ),
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._batch_active = False
-            message = str(exc)
-            self.after(0, lambda: self._on_batch_worker_error(message))
-            return
-        self.after(
-            0,
-            lambda: self._on_batch_finished(
-                processed,
-                len(items),
-                completed,
-                failed,
-                cancelled or self._batch_cancel_event.is_set(),
-            ),
-        )
-
-    def _on_batch_item_done(
-        self,
-        block_id: str,
-        success: bool,
-        error: str,
-        processed: int,
-        total: int,
-        completed: int,
-        failed: int,
-    ):
-        if success:
-            selected_id = self.current.block_id if self.current else None
-            self.items = [item for item in self.items if item.block_id != block_id]
-            if selected_id == block_id:
-                self.current = None
-                self._clear_editor()
-            self._refresh_tree(selected_id if selected_id != block_id else None)
-        elif error:
-            for item in self.items:
-                if item.block_id == block_id:
-                    item.error = error
-                    break
-            self._refresh_tree(self.current.block_id if self.current else None)
-        self.batch_progress.set((processed / total) if total else 1)
-        self.batch_status_var.set(f"批量重试：{processed}/{total}，成功 {completed}，失败 {failed}")
-        self.status_var.set(self.batch_status_var.get())
-        if not success and error:
-            self.error_label.configure(text=f"最近失败块：{block_id}    原因：{error}")
-
-    def _on_batch_finished(
-        self,
-        processed: int,
-        total: int,
-        completed: int,
-        failed: int,
-        cancelled: bool,
-    ):
-        self._busy = False
-        self._batch_active = False
-        close_requested = self._close_requested
-        self._close_requested = False
-        self.translate_btn.configure(state="normal")
-        self.single_stop_btn.configure(state="disabled")
-        self.batch_btn.configure(state="normal")
-        self.batch_stop_btn.configure(state="disabled")
-        self.save_btn.configure(state="normal")
-        self.close_btn.configure(state="normal")
-        self.batch_progress.set((processed / total) if total else 1)
-        if cancelled:
-            status = f"批量已停止：处理 {processed}/{total}，成功 {completed}，失败 {failed}"
-        else:
-            status = f"批量完成：成功 {completed}，失败 {failed}"
-        self.batch_status_var.set(status)
-        self._load_items()
-        self.status_var.set(status)
-        if close_requested:
-            self.destroy()
-
-    def _on_batch_worker_error(self, message: str):
-        self._busy = False
-        self._batch_active = False
-        close_requested = self._close_requested
-        self._close_requested = False
-        self.translate_btn.configure(state="normal")
-        self.single_stop_btn.configure(state="disabled")
-        self.batch_btn.configure(state="normal")
-        self.batch_stop_btn.configure(state="disabled")
-        self.save_btn.configure(state="normal")
-        self.close_btn.configure(state="normal")
-        self._load_items()
-        self.status_var.set("批量重试出错")
-        if close_requested:
-            self.destroy()
-        else:
-            messagebox.showerror("批量重试出错", message, parent=self)
-
-    def _stop_batch_retry(self):
-        if self._batch_active:
-            self._batch_cancel_event.set()
-            self.batch_stop_btn.configure(state="disabled")
-            self.batch_status_var.set("正在停止批量…")
-
-    def _stop_single_retry(self):
-        if self._busy and not self._batch_active:
-            self._single_cancel_event.set()
-            self.single_stop_btn.configure(state="disabled")
-            self.status_var.set("正在停止当前块请求…")
-
-    def _close_dialog(self):
-        if not self._busy:
-            self.destroy()
-            return
-        self._close_requested = True
-        if not self._batch_active:
-            self._single_cancel_event.set()
-            self.single_stop_btn.configure(state="disabled")
-            self.status_var.set("正在停止当前块请求，完成后关闭窗口…")
-            return
-        if self._batch_cancel_event.is_set():
-            return
-        self._batch_cancel_event.set()
-        self.batch_stop_btn.configure(state="disabled")
-        self.batch_status_var.set("正在停止批量，完成后关闭窗口…")
-        return
-
-    def _clear_editor(self):
-        self.source_box.configure(state="normal")
-        self.source_box.delete("1.0", "end")
-        self.source_box.configure(state="disabled")
-        self.output_box.delete("1.0", "end")
-        self.error_label.configure(text="")
-
-    def _on_model_done(self, translated: list[str]):
-        self._busy = False
-        self.single_stop_btn.configure(state="disabled")
-        self.translate_btn.configure(state="normal")
-        self.batch_btn.configure(state="normal")
-        self.save_btn.configure(state="normal")
-        self.output_box.delete("1.0", "end")
-        self.output_box.insert("end", self._format_segments(translated))
-        self.status_var.set("模型改写完成，请人工核对后保存")
-        if self._close_requested:
-            self.destroy()
-
-    def _on_model_error(self, message: str):
-        self._busy = False
-        self.single_stop_btn.configure(state="disabled")
-        self.translate_btn.configure(state="normal")
-        self.batch_btn.configure(state="normal")
-        self.save_btn.configure(state="normal")
-        self.status_var.set("模型改写失败")
-        if self._close_requested:
-            self.destroy()
-        else:
-            messagebox.showerror("改写失败", message, parent=self)
-
-    def _save_translation(self):
-        item = self.current
-        if item is None:
-            messagebox.showwarning("提示", "请先选择一个失败块", parent=self)
-            return
-        try:
-            translated = self._parse_segments(
-                self.output_box.get("1.0", "end"),
-                len(item.source_segments),
-            )
-            translated = [self.glossary.apply_replacements(value) for value in translated]
-            save_manual_perspective_translation(self.state_path, item.block_id, translated)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("保存失败", str(exc), parent=self)
-            return
-        self.items = [value for value in self.items if value.block_id != item.block_id]
-        self.current = None
-        self._refresh_tree()
-        self.source_box.configure(state="normal")
-        self.source_box.delete("1.0", "end")
-        self.source_box.configure(state="disabled")
-        self.output_box.delete("1.0", "end")
-        self.error_label.configure(text="")
-        self.status_var.set(f"已保存，剩余 {len(self.items)} 个失败块")
+_DEFAULT_LEFT_WIDTH = 360
 
 
 class App(ctk.CTk):
@@ -1386,13 +89,19 @@ class App(ctk.CTk):
         ):
             saved_geom = self._legacy_geometry_to_logical(saved_geom)
         if isinstance(saved_geom, str) and "x" in saved_geom:
-            try:
-                self.geometry(saved_geom)
-            except Exception:
-                self.geometry("1360x860")
+            geom = saved_geom
         else:
-            self.geometry("1360x860")
-        self.minsize(1120, 720)
+            geom = self._default_geometry()
+        try:
+            self.geometry(self._clamp_geometry(geom))
+        except Exception:
+            try:
+                self.geometry(self._clamp_geometry("1260x800"))
+            except Exception:
+                pass
+        # 限制最小尺寸，并确保不超出屏幕：小屏/缩放屏下优先保持可读、可滚动，而不是被裁切。
+        min_w, min_h = self._clamp_min_size(860, 540)
+        self.minsize(min_w, min_h)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # 用户拖动/移动窗口时防抖落盘，即使进程被强杀也能保留上次尺寸。
         self.bind("<Configure>", self._on_window_configure, add="+")
@@ -1421,19 +130,37 @@ class App(ctk.CTk):
 
     # ---------------- UI ----------------
     def _build_layout(self):
-        self.grid_columnconfigure(0, weight=0, minsize=360)
-        self.grid_columnconfigure(1, weight=1)
+        self._left_panel_width = int(self.ui_state.get("left_panel_width", _DEFAULT_LEFT_WIDTH) or _DEFAULT_LEFT_WIDTH)
+        self.grid_columnconfigure(0, weight=0, minsize=self._left_panel_width)
+        self.grid_columnconfigure(1, weight=0, minsize=8)
+        self.grid_columnconfigure(2, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0, minsize=156)
 
-        left = ctk.CTkFrame(self, width=360, corner_radius=8, border_width=1, border_color=THEME["card_border"])
-        left.grid(row=0, column=0, padx=(14, 8), pady=14, sticky="nsew")
-        left.grid_columnconfigure(1, weight=1)
-        left.grid_rowconfigure(2, weight=1)
-        self._build_left(left)
+        left = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=THEME["card_border"])
+        left.grid(row=0, column=0, padx=(14, 0), pady=14, sticky="nsew")
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(0, weight=1)
+        left_scroll = DebouncedScrollableFrame(left, fg_color="transparent")
+        left_scroll.grid(row=0, column=0, sticky="nsew")
+        left_scroll.grid_columnconfigure(1, weight=1)
+        self._build_left(left_scroll)
+
+        divider = ctk.CTkFrame(
+            self,
+            width=8,
+            corner_radius=4,
+            fg_color=THEME["card_border"],
+            cursor="sb_h_double_arrow",
+        )
+        divider.grid(row=0, column=1, pady=14, sticky="ns")
+        divider.bind("<ButtonPress-1>", self._on_divider_press)
+        divider.bind("<B1-Motion>", self._on_divider_motion)
+        divider.bind("<ButtonRelease-1>", self._on_divider_release)
+        self._divider_active = False
 
         right = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=THEME["card_border"])
-        right.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
+        right.grid(row=0, column=2, padx=(0, 14), pady=14, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
 
@@ -1462,9 +189,32 @@ class App(ctk.CTk):
         self._build_perspective_tab(self.tab_perspective)
 
         bottom = ctk.CTkFrame(self, corner_radius=8, border_width=1, border_color=THEME["card_border"])
-        bottom.grid(row=1, column=0, columnspan=2, padx=14, pady=(0, 14), sticky="nsew")
+        bottom.grid(row=1, column=0, columnspan=3, padx=14, pady=(0, 14), sticky="nsew")
         bottom.grid_columnconfigure(0, weight=1)
         self._build_bottom(bottom)
+
+    def _on_divider_press(self, _event):
+        self._divider_active = True
+
+    def _on_divider_motion(self, event):
+        if not self._divider_active:
+            return
+        try:
+            pointer_x = event.x_root - self.winfo_rootx()
+            total_w = self.winfo_width()
+        except Exception:
+            return
+        min_left = 320
+        min_right = 380
+        left_w = max(min_left, pointer_x - 18)
+        left_w = min(left_w, max(min_left, total_w - min_right - 8 - 28))
+        self._left_panel_width = left_w
+        self.grid_columnconfigure(0, minsize=left_w)
+
+    def _on_divider_release(self, _event):
+        self._divider_active = False
+        # 拖拽结束即落盘，避免拖动后的宽度在重启时被旧配置覆盖。
+        self._save_window_geometry()
 
     def _build_left(self, parent):
         row = 0
@@ -1584,7 +334,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(parent, text="设置", font=ctk.CTkFont(size=18, weight="bold")).grid(
             row=0, column=0, padx=18, pady=(16, 8), sticky="w"
         )
-        body = ctk.CTkScrollableFrame(parent)
+        body = DebouncedScrollableFrame(parent)
         body.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
         body.grid_columnconfigure(1, weight=1)
 
@@ -3765,6 +2515,39 @@ class App(ctk.CTk):
         height = round(int(match.group(2)) / scale)
         return f"{width}x{height}{match.group(3) or ''}"
 
+    def _default_geometry(self) -> str:
+        """无历史几何时，按当前屏幕展开一个接近全屏且保留左右分栏的大窗口。"""
+        sw, sh = self._screen_logical_size()
+        w = max(880, int(sw * 0.90))
+        h = max(620, int(sh * 0.86))
+        return f"{w}x{h}"
+
+    def _screen_logical_size(self) -> tuple[int, int]:
+        """返回以逻辑单位计的可视区域宽高，便于把窗口钳制到屏幕范围内。"""
+        try:
+            scale = float(self._get_window_scaling() or 1.0)
+        except Exception:
+            scale = 1.0
+        if scale <= 0:
+            scale = 1.0
+        return int(self.winfo_screenwidth() / scale), int(self.winfo_screenheight() / scale)
+
+    def _clamp_geometry(self, geom: str) -> str:
+        """把逻辑几何的宽高裁剪到屏幕范围（保留位置偏移），避免小屏下端头被裁掉。"""
+        sw, sh = self._screen_logical_size()
+        match = re.match(r"^(\d+)x(\d+)([+-]\d+[+-]\d+)?$", geom)
+        if not match:
+            return geom
+        w = int(match.group(1))
+        h = int(match.group(2))
+        w = min(w, max(sw - 40, 600))
+        h = min(h, max(sh - 40, 480))
+        return f"{w}x{h}{match.group(3) or ''}"
+
+    def _clamp_min_size(self, w: int, h: int) -> tuple[int, int]:
+        sw, sh = self._screen_logical_size()
+        return min(w, max(sw - 40, 480)), min(h, max(sh - 40, 360))
+
     def _on_window_configure(self, event):
         # 只处理主窗口自身的变化，忽略子控件触发的大量 Configure。
         if event.widget is not self:
@@ -3781,6 +2564,7 @@ class App(ctk.CTk):
             state = _load_ui_state()
             state["geometry"] = self.geometry()
             state["window_state"] = self.state()
+            state["left_panel_width"] = int(getattr(self, "_left_panel_width", _DEFAULT_LEFT_WIDTH) or _DEFAULT_LEFT_WIDTH)
             _save_ui_state(state)
         except Exception:
             pass

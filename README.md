@@ -253,13 +253,19 @@ hangulTranslate/
 ├─ main.py                            # 入口：GUI（默认）或命令行（--input 参数）
 ├─ requirements.txt
 ├─ README.md
-├─ BAT脚本详解.md                      # start.bat 逐行教程（示例为历史版本，仅供参考）
 ├─ docs/                              # 设计文档与待办索引
 │  ├─ README.md
 │  ├─ settings_tab_plan.md
 │  └─ TODO.md
 ├─ hangul_novel_translator/
 │  ├─ __init__.py
+│  ├─ gui/                            # 图形界面（主窗口、主题、状态、控件、对话框）
+│  │  ├─ __init__.py
+│  │  ├─ app.py                       # 主窗口 App + run_gui（词表 + 多卷修正 + 视角转换）
+│  │  ├─ theme.py                     # 配色与 Tk 主题
+│  │  ├─ state.py                     # .gui_config.json 读写（窗口尺寸/分栏宽度）
+│  │  ├─ widgets.py                   # TreeviewTooltip、DebouncedScrollableFrame
+│  │  └─ dialogs.py                   # 词表/清洗/失败块等编辑弹窗
 │  ├─ config.py                       # 配置（AppConfig）
 │  ├─ llm.py                          # OpenAI 兼容客户端
 │  ├─ book.py                         # TXT/EPUB 解析与导出（含脚注链接改写）
@@ -271,8 +277,7 @@ hangulTranslate/
 │  ├─ sanitizer.py                    # 导出期文本清洗（Export Sanitizer）
 │  ├─ epub_fixer.py                   # 成品 EPUB 词表无损原地矫正
 │  ├─ epub_validator.py               # EPUB 成品校验
-│  ├─ utils.py                        # 通用工具
-│  └─ gui.py                          # CustomTkinter 界面（词表 + 多卷修正 + 视角转换）
+│  └─ utils.py                        # 通用工具
 ├─ tests/                             # 单元测试
 │  ├─ test_core.py
 │  ├─ test_epub_fixer.py
