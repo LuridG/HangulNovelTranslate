@@ -25,7 +25,7 @@ from ..config import AppConfig
 from ..epub_fixer import fix_finished_epub_in_place, preview_finished_epub
 from ..glossary import Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary
 from ..llm import LLMCancelled, LLMClient
-from ..merge import audit_translation_state, book_from_state, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
+from ..merge import audit_translation_state, book_from_state, detect_merge_title, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state
 from ..perspective import (
     PerspectiveBlock,
     PerspectiveConverter,
@@ -586,7 +586,8 @@ class App(ctk.CTk):
         parent.grid_rowconfigure(1, weight=1)
 
         self.merge_files: list[Path] = []
-        self.merge_title_var = tk.StringVar(value="多卷合集")
+        self.merge_title_var = tk.StringVar(value="")
+        self._merge_title_manual = False
         self.merge_txt_var = tk.BooleanVar(value=True)
         self.merge_epub_var = tk.BooleanVar(value=True)
         self.merge_review_threshold_var = tk.StringVar(value="30")
@@ -638,7 +639,9 @@ class App(ctk.CTk):
         cfg_frame = ctk.CTkFrame(parent, fg_color="transparent")
         cfg_frame.grid(row=3, column=0, padx=12, pady=(0, 8), sticky="ew")
         ctk.CTkLabel(cfg_frame, text="合并书名").grid(row=0, column=0, padx=(4, 8), sticky="w")
-        ctk.CTkEntry(cfg_frame, textvariable=self.merge_title_var, width=240).grid(row=0, column=1, padx=4, sticky="w")
+        self.merge_title_entry = ctk.CTkEntry(cfg_frame, textvariable=self.merge_title_var, width=240)
+        self.merge_title_entry.grid(row=0, column=1, padx=4, sticky="w")
+        self.merge_title_entry.bind("<KeyRelease>", self._on_merge_title_edited)
         ctk.CTkCheckBox(cfg_frame, text="输出 TXT", variable=self.merge_txt_var).grid(row=0, column=2, padx=(18, 4))
         ctk.CTkCheckBox(cfg_frame, text="输出 EPUB", variable=self.merge_epub_var).grid(row=0, column=3, padx=4)
         ctk.CTkCheckBox(
@@ -1851,15 +1854,25 @@ class App(ctk.CTk):
     def _refresh_merge_tree(self):
         for item in self.merge_tree.get_children():
             self.merge_tree.delete(item)
+        titles: list[str] = []
         for index, path in enumerate(self.merge_files):
             try:
                 info = inspect_state(path)
                 detail = (
                     f"{info['title']} · 完成 {info['completed']}/{info['total_chunks']} 块"
                 )
+                titles.append(info["title"])
             except Exception as exc:  # noqa: BLE001
                 detail = f"读取失败：{exc}"
             self.merge_tree.insert("", "end", iid=str(index), values=(index + 1, str(path), detail))
+        if not self._merge_title_manual:
+            detected = detect_merge_title(titles)
+            if detected:
+                self.merge_title_var.set(detected)
+
+    def _on_merge_title_edited(self, _event=None):
+        # 用户手动改动后，不再自动覆盖，保留其自定义书名。
+        self._merge_title_manual = True
 
     def _merge_review_async(self):
         if not self.merge_files:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from hangul_novel_translator.sanitizer import ExportSanitizer
 
 import json
+import os
 import posixpath
 import re
 from dataclasses import replace
@@ -205,6 +206,19 @@ def inspect_state(path: Path) -> dict[str, Any]:
         "completed": len(completed),
         "failed": len(data.get("failed") or {}),
     }
+
+
+def detect_merge_title(titles: list[str]) -> str:
+    """从各卷原书文件名提取合并书名。
+    单本直接用文件名；多卷取公共前缀（如 魂火1/魂火2 → 魂火），
+    避免出现用顿号拼接卷名的劣质标题。"""
+    cleaned = [str(t).strip() for t in titles if t and str(t).strip()]
+    if not cleaned:
+        return ""
+    if len(set(cleaned)) == 1:
+        return cleaned[0]
+    prefix = os.path.commonprefix(cleaned)
+    return prefix.rstrip(" \t·-—_/")
 
 
 def _chunk_config(state: dict[str, Any], config: AppConfig) -> AppConfig:

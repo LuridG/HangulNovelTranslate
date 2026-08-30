@@ -11,6 +11,7 @@ from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary, GlossaryEntry
 from hangul_novel_translator.merge import (
     book_from_state,
+    detect_merge_title,
     export_merged,
     fix_book,
     inspect_state,
@@ -459,6 +460,28 @@ class MergeHierarchyTest(unittest.TestCase):
         self.assertEqual([ch.heading_level for ch in merged.chapters], [1, 2, 3, 3])
         self.assertEqual([ch.parent_index for ch in merged.chapters], [None, 0, 1, 1])
         self.assertEqual([ch.is_section for ch in merged.chapters], [True, True, False, False])
+
+
+class DetectMergeTitleTest(unittest.TestCase):
+    def test_single_archive_uses_filename(self):
+        self.assertEqual(detect_merge_title(["魂火"]), "魂火")
+
+    def test_identical_titles_kept(self):
+        self.assertEqual(detect_merge_title(["魂火", "魂火"]), "魂火")
+
+    def test_multi_volume_common_prefix(self):
+        self.assertEqual(detect_merge_title(["魂火1", "魂火2"]), "魂火")
+        self.assertEqual(detect_merge_title(["魂火 上", "魂火 下"]), "魂火")
+
+    def test_separator_is_stripped(self):
+        self.assertEqual(detect_merge_title(["魂火·上", "魂火·下"]), "魂火")
+
+    def test_empty_and_blank(self):
+        self.assertEqual(detect_merge_title([]), "")
+        self.assertEqual(detect_merge_title(["", "  "]), "")
+
+    def test_unrelated_titles_return_empty(self):
+        self.assertEqual(detect_merge_title(["甲书", "乙书"]), "")
 
 
 if __name__ == "__main__":
