@@ -28,7 +28,11 @@ from .txt import _chunk_paragraphs_by_chars
 from .txt import _looks_like_heading
 from .txt import _read_text_auto
 from .txt import book_to_txt
+from .txt import DEFAULT_TXT_PATTERNS
+from .txt import drop_zero_chapters
 from .txt import parse_txt
+from .txt import parse_txt_with_patterns
+from .txt import preview_txt_chapters
 from .text import _decode_bytes
 from .text import _strip_invisible_chars
 from .epub import _ancestor_styles
@@ -83,8 +87,10 @@ __all__ = [
     'BlockStyle',
     'Book',
     'Chapter',
+    'DEFAULT_TXT_PATTERNS',
     'ParagraphStyle',
     'book_to_txt',
+    'drop_zero_chapters',
     'export_epub',
     'is_decorative_title',
     'load_book',
@@ -92,5 +98,7 @@ __all__ = [
     'metadata_to_dict',
     'parse_epub',
     'parse_txt',
+    'parse_txt_with_patterns',
+    'preview_txt_chapters',
     'strip_inline_markers',
 ]

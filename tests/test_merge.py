@@ -29,7 +29,7 @@ from hangul_novel_translator.merge import (
     save_title_translations,
     TitleTranslationItem,
 )
-from hangul_novel_translator.translator import build_chunks
+from hangul_novel_translator.translator import _chunk_signature, build_chunks
 
 
 class MergeLogicTest(unittest.TestCase):
@@ -144,6 +144,41 @@ class MergeLogicTest(unittest.TestCase):
             book = book_from_state(state, AppConfig())
             self.assertEqual(len(book.chapters), 1)
             self.assertEqual(book.chapters[0].paragraphs, ["译vol1一", "译vol1二"])
+
+    def test_book_from_state_uses_saved_txt_patterns(self):
+        """多卷修正按存档保存的 txt 分章方案重建章节，避免结构签名不一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            txt = tmp / "novel.txt"
+            txt.write_text(
+                "제1장 시작\n" + "본문입니다. " * 40 + "\n제2장 전개\n" + "본문입니다. " * 40 + "\n",
+                encoding="utf-8",
+            )
+            patterns = [r"^\s*제\s*\d+\s*장"]
+            config = AppConfig(txt_patterns=patterns, chunk_chars=1800, max_paragraph_chars=2600)
+            book = load_book(txt, txt_patterns=patterns)
+            chunks = build_chunks(book, config)
+            state = {
+                "source": str(txt),
+                "total_chunks": len(chunks),
+                "chunk_signature": _chunk_signature(chunks),
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "txt_patterns": patterns,
+                "ignore_zero_chapters": False,
+                "completed": {chunks[0].id: ["译文一", "译文二"]},
+                "failed": {},
+            }
+            state_path = tmp / "novel.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            # 传入不带 txt_patterns 的 config，也应从存档恢复方案且不报错。
+            restored = book_from_state(
+                state_path,
+                AppConfig(chunk_chars=1800, max_paragraph_chars=2600),
+            )
+        self.assertEqual(len(restored.chapters), 2)
+        self.assertEqual(restored.chapters[0].title, "제1장 시작")
+        self.assertEqual(restored.chapters[1].title, "제2장 전개")
 
     def test_book_from_state_requires_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,6 +459,39 @@ class ChapterTitleMergeTest(unittest.TestCase):
             restored = book_from_state(state_path, AppConfig())
         self.assertEqual(restored.chapters[0].title_zh, "第一章 开始")
         self.assertEqual(restored.chapters[0].display_title, "第一章 开始")
+
+    def test_book_from_state_aligns_title_zh_by_ko_when_indices_shift(self):
+        # 旧存档：标题表按“含 0 字/分卷占位”的完整结构落盘（3 条），
+        # 但正文翻译用 drop_zero=True 重组后只剩 2 章，导致下标错位。
+        # 结论：仍应依据 ko 内容把中文标题对到正确章节，而不是按 index 硬配。
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            txt = tmp / "vol1.txt"
+            txt.write_text("제1권\n제1장\n본문 1\n제2장\n본문 2\n", encoding="utf-8")
+            state = {
+                "source": str(txt),
+                "chunk_chars": 1800,
+                "max_paragraph_chars": 2600,
+                "completed": {},
+                "failed": {},
+                "chapter_titles": {
+                    "0": {"ko": "제1권", "zh": "第一卷"},
+                    "1": {"ko": "제1장", "zh": "第一章"},
+                    "2": {"ko": "제2장", "zh": "第二章"},
+                },
+            }
+            state_path = tmp / "vol1.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            config = AppConfig(
+                txt_patterns=[r"^\s*제\d+권", r"^\s*제\d+장"],
+                ignore_zero_chapters=True,
+                chunk_chars=1800,
+                max_paragraph_chars=2600,
+            )
+            restored = book_from_state(state_path, config)
+        self.assertEqual([ch.title for ch in restored.chapters], ["제1장", "제2장"])
+        self.assertEqual([ch.title_zh for ch in restored.chapters], ["第一章", "第二章"])
+        self.assertEqual([ch.display_title for ch in restored.chapters], ["第一章", "第二章"])
 
     def test_book_from_state_raises_on_structure_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

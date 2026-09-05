@@ -17,6 +17,10 @@ def _retry_chunk_config(state: dict, config: AppConfig) -> AppConfig:
         kwargs["chunk_chars"] = state["chunk_chars"]
     if isinstance(state.get("max_paragraph_chars"), int) and state["max_paragraph_chars"] > 0:
         kwargs["max_paragraph_chars"] = state["max_paragraph_chars"]
+    if isinstance(state.get("txt_patterns"), list):
+        kwargs["txt_patterns"] = [str(p) for p in state["txt_patterns"] if str(p).strip()]
+    if isinstance(state.get("ignore_zero_chapters"), bool):
+        kwargs["ignore_zero_chapters"] = state["ignore_zero_chapters"]
     return replace(config, **kwargs) if kwargs else config
 
 

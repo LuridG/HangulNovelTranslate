@@ -195,6 +195,8 @@ class ShellMixin:
             "chunk_chars": chunk_chars,
             "max_workers": workers,
             "extract_glossary": self.extract_var.get(),
+            "txt_patterns": list(getattr(self, "_active_txt_patterns", self._txt_patterns())),
+            "ignore_zero_chapters": bool(getattr(self, "_active_ignore_zero", False)),
             "output_txt": self.txt_var.get(),
             "output_epub": self.epub_var.get(),
             "sanitizer_config": self.sanitizer_config.to_dict(),
@@ -279,7 +281,11 @@ class ShellMixin:
                 if config.extract_glossary and not glossary.valid_entries():
                     try:
                         llm = LLMClient(config)
-                        book = load_book(path)
+                        book = load_book(
+                            path,
+                            txt_patterns=config.txt_patterns,
+                            drop_zero=config.ignore_zero_chapters,
+                        )
                         sample = collect_sample_text_strided(book, config)
                         report = sample_chapter_report(book, config)
                         self.log(

@@ -37,6 +37,12 @@ class AppConfig:
     extract_sample_chars_cap: int = 60000
     glossary_limit: int = 120
 
+    # TXT 章节标题正则：每个元素是一条原始正则字符串，用于解析/拆分 TXT 章节。
+    # 留空表示使用内置默认正则；多本 TXT 共用同一组正则并按文件顺序切分。
+    txt_patterns: list[str] = field(default_factory=list)
+    # 是否剔除正文为 0 字的空章节（预览里「忽视 0 字章节」确认后生效）。
+    ignore_zero_chapters: bool = False
+
     # 断点续传。
     resume: bool = True
 

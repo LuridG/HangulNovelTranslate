@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from ..book import (Book, Chapter, ParagraphStyle, _href_basename, book_to_txt, export_epub, is_decorative_title, load_book, metadata_from_dict, metadata_to_dict, parse_epub)
+from ..book import (Book, Chapter, ParagraphStyle, _href_basename, book_to_txt, drop_zero_chapters, export_epub, is_decorative_title, load_book, metadata_from_dict, metadata_to_dict, parse_epub)
 from ..config import AppConfig
 from ..translator import (_chunk_signature, build_chunks, normalize_completed_paragraphs)
 from ._consts import _HANGUL_RUN_RE
@@ -55,7 +55,7 @@ def review_translation_state(
         data["failed"] = failed
 
     cfg = _chunk_config(data, config)
-    book = load_book(source)
+    book = load_book(source, txt_patterns=cfg.txt_patterns, drop_zero=cfg.ignore_zero_chapters)
     chunks = {chunk.id: chunk for chunk in build_chunks(book, cfg)}
     flagged: list[dict[str, Any]] = []
     for chunk_id, values in list(completed.items()):
@@ -123,7 +123,7 @@ def audit_translation_state(
         data["failed"] = failed
 
     cfg = _chunk_config(data, config)
-    book = load_book(source)
+    book = load_book(source, txt_patterns=cfg.txt_patterns, drop_zero=cfg.ignore_zero_chapters)
     chunks = {chunk.id: chunk for chunk in build_chunks(book, cfg)}
     flagged: list[dict[str, Any]] = []
     for chunk_id, values in list(completed.items()):
@@ -191,16 +191,20 @@ def audit_title_translation(state_path: Path) -> dict[str, Any]:
     saved_titles = data.get("chapter_titles") or {}
     if not isinstance(saved_titles, dict):
         saved_titles = {}
-    book = load_book(source)
+    book = load_book(
+        source,
+        txt_patterns=data.get("txt_patterns"),
+        drop_zero=bool(data.get("ignore_zero_chapters", False)),
+    )
+    matched_titles = _match_titles_to_chapters(saved_titles, book.chapters)
     items: list[dict[str, Any]] = []
     translated = 0
     for chapter in book.chapters:
         if not chapter.title or is_decorative_title(chapter.title):
             continue
-        saved = saved_titles.get(str(chapter.index))
-        saved = saved if isinstance(saved, dict) else {}
-        zh = str(saved.get("zh", "") or "").strip()
-        ko_matches = str(saved.get("ko", "") or "") == chapter.title
+        matched = matched_titles.get(chapter.index) or {}
+        zh = matched.get("zh", "")
+        ko_matches = matched.get("ko") == chapter.title
         if zh and ko_matches:
             translated += 1
         else:
@@ -226,15 +230,19 @@ def detect_title_translations(state_path: Path) -> list[TitleTranslationItem]:
     saved_titles = data.get("chapter_titles") or {}
     if not isinstance(saved_titles, dict):
         saved_titles = {}
-    book = load_book(source)
+    book = load_book(
+        source,
+        txt_patterns=data.get("txt_patterns"),
+        drop_zero=bool(data.get("ignore_zero_chapters", False)),
+    )
+    matched_titles = _match_titles_to_chapters(saved_titles, book.chapters)
     items: list[TitleTranslationItem] = []
     for chapter in book.chapters:
         if not chapter.title or is_decorative_title(chapter.title):
             continue
-        saved = saved_titles.get(str(chapter.index))
-        saved = saved if isinstance(saved, dict) else {}
-        zh = str(saved.get("zh", "") or "").strip()
-        ko_matches = str(saved.get("ko", "") or "") == chapter.title
+        matched = matched_titles.get(chapter.index) or {}
+        zh = matched.get("zh", "")
+        ko_matches = matched.get("ko") == chapter.title
         if not (zh and ko_matches):
             items.append(
                 TitleTranslationItem(
@@ -456,7 +464,66 @@ def _chunk_config(state: dict[str, Any], config: AppConfig) -> AppConfig:
         kwargs["chunk_chars"] = state["chunk_chars"]
     if isinstance(state.get("max_paragraph_chars"), int) and state["max_paragraph_chars"] > 0:
         kwargs["max_paragraph_chars"] = state["max_paragraph_chars"]
+    if isinstance(state.get("txt_patterns"), list):
+        kwargs["txt_patterns"] = [str(p) for p in state["txt_patterns"] if str(p).strip()]
+    if isinstance(state.get("ignore_zero_chapters"), bool):
+        kwargs["ignore_zero_chapters"] = state["ignore_zero_chapters"]
     return replace(config, **kwargs) if kwargs else config
+
+
+
+def _ordered_title_entries(saved_titles: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """把 chapter_titles 按章节下标排序，返回 [(key, ko, zh), ...]（仅含 ko 非空的条目）。"""
+    entries: list[tuple[str, str, str]] = []
+    for key, value in (saved_titles or {}).items():
+        if not isinstance(value, dict):
+            continue
+        ko = str(value.get("ko", "") or "").strip()
+        zh = str(value.get("zh", "") or "").strip()
+        if ko:
+            entries.append((str(key), ko, zh))
+    # 数字键按数值排序，其他键靠后（保持稳定次序）。
+    entries.sort(key=lambda item: (int(item[0]) if str(item[0]).isdigit() else 10 ** 9, str(item[0])))
+    return entries
+
+
+
+def _match_titles_to_chapters(
+    saved_titles: dict[str, Any],
+    chapters: list[Chapter],
+) -> dict[int, dict[str, str]]:
+    """把存档 chapter_titles 按 ko 内容顺序对齐到重建章节，返回 {index: {"ko", "zh"}}。
+
+    优先按下标精确匹配（章节结构一致时最准确），未命中再按 ko 有序贪心匹配，
+    兼容“标题表含有 0 字/分卷占位节点而正文结构把它们剔除”导致的下标错位，
+    例如旧存档标题表记录了 10 章、实际译文只有 5 章（1권 与空节点被丢弃）。
+    """
+    entries = _ordered_title_entries(saved_titles)
+    result: dict[int, dict[str, str]] = {}
+    used: set[str] = set()
+    # 第一步：下标与 ko 都一致时直接配对，最准确。
+    for chapter in chapters:
+        saved = saved_titles.get(str(chapter.index))
+        if not isinstance(saved, dict):
+            continue
+        ko = str(saved.get("ko", "") or "").strip()
+        if ko == chapter.title:
+            result[chapter.index] = {"ko": ko, "zh": str(saved.get("zh", "") or "").strip()}
+            used.add(str(chapter.index))
+    # 第二步：未配对的章节按 ko 有序贪心匹配剩余条目（顺序与源书一致）。
+    for chapter in chapters:
+        if chapter.index in result:
+            continue
+        if not chapter.title or is_decorative_title(chapter.title):
+            continue
+        for key, ko, zh in entries:
+            if key in used:
+                continue
+            if ko == chapter.title:
+                result[chapter.index] = {"ko": ko, "zh": zh}
+                used.add(key)
+                break
+    return result
 
 
 
@@ -467,11 +534,15 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
     source = Path(str(data.get("source", "")))
     if not source.exists():
         raise ValueError(f"存档对应的原书不存在：{source}")
-    book = load_book(source)
+    cfg = _chunk_config(data, config)
+    book = load_book(
+        source,
+        txt_patterns=cfg.txt_patterns,
+        drop_zero=cfg.ignore_zero_chapters,
+    )
     restored = metadata_from_dict(data.get("metadata"))
     if restored:
         book.metadata = restored
-    cfg = _chunk_config(data, config)
     completed = data.get("completed") or {}
     if not isinstance(completed, dict):
         completed = {}
@@ -488,7 +559,9 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
         )
     if completed_ids and structure_changed:
         raise ValueError(
-            "存档的章节结构与当前解析不一致（章节解析规则已更新），请重新翻译后再合并输出。"
+            "存档的章节结构与当前解析不一致（章节解析规则或 TXT 分章正则已更新）。\n"
+            "若为 TXT 输入，请确认左侧章节正则与翻译时一致（重新「章节检测」并确认），"
+            "或重新翻译生成新存档后再合并输出。"
         )
     by_chapter: dict[int, list[Any]] = {}
     for chunk in chunks:
@@ -529,10 +602,11 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
             )
         )
     saved_titles = data.get("chapter_titles") or {}
+    matched_titles = _match_titles_to_chapters(saved_titles, chapters)
     for chapter in chapters:
-        saved = saved_titles.get(str(chapter.index)) or {}
-        if saved.get("zh") and saved.get("ko") == chapter.title:
-            chapter.title_zh = saved["zh"]
+        matched = matched_titles.get(chapter.index)
+        if matched and matched.get("zh"):
+            chapter.title_zh = matched["zh"]
     return Book(
             title=book.title,
             chapters=chapters,
@@ -556,6 +630,9 @@ def repair_image_state(state_path: Path, config: AppConfig) -> dict[str, Any]:
     old_book = parse_epub(source, include_standalone_images=False)
     new_book = parse_epub(source, include_standalone_images=True)
     old_cfg = _chunk_config(data, config)
+    if old_cfg.ignore_zero_chapters:
+        old_book = drop_zero_chapters(old_book)
+        new_book = drop_zero_chapters(new_book)
     old_chunks = build_chunks(old_book, old_cfg)
     new_chunks = build_chunks(new_book, old_cfg)
     legacy_state = not bool(data.get("chunk_signature"))

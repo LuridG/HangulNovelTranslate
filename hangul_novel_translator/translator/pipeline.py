@@ -135,7 +135,11 @@ class Translator:
             auto_extract = self.config.extract_glossary
 
         self.progress_callback("读取书籍", 0, 1, str(input_path))
-        book = load_book(input_path)
+        book = load_book(
+            input_path,
+            txt_patterns=self.config.txt_patterns,
+            drop_zero=self.config.ignore_zero_chapters,
+        )
         self.progress_callback("拆分章节", 0, 1, f"共 {len(book.chapters)} 章，{book.total_chars} 字")
 
         if auto_extract and not glossary.valid_entries():
@@ -194,6 +198,8 @@ class Translator:
         state["chunk_signature"] = signature
         state["chunk_chars"] = self.config.chunk_chars
         state["max_paragraph_chars"] = self.config.max_paragraph_chars
+        state["txt_patterns"] = list(self.config.txt_patterns)
+        state["ignore_zero_chapters"] = bool(self.config.ignore_zero_chapters)
         state["metadata"] = metadata_to_dict(book.metadata)
         self._save_state(state_path, state)
 
@@ -335,8 +341,12 @@ class Translator:
                 # 旧版存档只存错误字符串：按原书重新分块定位；原书缺失则无法定位。
                 if source and source.exists():
                     if by_id is None:
-                        book = load_book(source)
                         cfg = _retry_chunk_config(data, self.config)
+                        book = load_book(
+                            source,
+                            txt_patterns=getattr(cfg, "txt_patterns", None),
+                            drop_zero=getattr(cfg, "ignore_zero_chapters", False),
+                        )
                         by_id = {c.id: c for c in build_chunks(book, cfg)}
                     chunk = by_id.get(chunk_id)
                 if chunk is None:

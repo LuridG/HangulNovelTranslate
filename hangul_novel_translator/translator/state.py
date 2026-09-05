@@ -42,7 +42,11 @@ def load_failed_chunks(state_path: str | Path, config: AppConfig) -> list[Failed
                 chapter_title = str(entry.get("chapter_title", ""))
         if paragraphs is None and source and source.exists():
             if chunks_by_id is None:
-                book = load_book(source)
+                book = load_book(
+                    source,
+                    txt_patterns=getattr(cfg, "txt_patterns", None),
+                    drop_zero=getattr(cfg, "ignore_zero_chapters", False),
+                )
                 chunks_by_id = {c.id: c for c in build_chunks(book, cfg)}
             chunk = chunks_by_id.get(chunk_id)
             if chunk is not None:

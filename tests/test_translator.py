@@ -14,6 +14,7 @@ from hangul_novel_translator import translator as translator_module
 from hangul_novel_translator.book import Book, Chapter, load_book
 from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary
+from hangul_novel_translator.merge import audit_title_translation, book_from_state
 from hangul_novel_translator.translator import (
     Translator,
     _chunk_signature,
@@ -398,6 +399,94 @@ class TranslatorRetryTest(unittest.TestCase):
                 translator_module.LLMClient = old
             expected = tmp / ".宇宙恐怖怎么样_第1卷.translation_state.json"
             self.assertTrue(expected.exists(), [p.name for p in tmp.iterdir()])
+
+    def test_translate_file_persists_scheme_and_titles(self):
+        """翻译 txt 后，存档保存分章方案与标题翻译成果，多卷修正可复用且不误报。"""
+        class CombinedLLM:
+            def __init__(self, config):
+                self.config = config
+
+            def chat(self, messages, *, temperature=None, json_mode=False):
+                user = str(messages[-1].get("content", ""))
+                if "【章节名列表】" in user:
+                    return '{"titles": {"0": "第一章译", "1": "第二章译"}}'
+                return '{"paragraphs": ["译文一"]}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "novel.txt"
+            src.write_text(
+                "제1장 시작\n" + "본문입니다. " * 30 + "\n제2장 전개\n" + "본문입니다. " * 30 + "\n",
+                encoding="utf-8",
+            )
+            config = AppConfig(
+                txt_patterns=[r"^\s*제\s*\d+\s*장"],
+                output_txt=False,
+                output_epub=False,
+                extract_glossary=False,
+                resume=False,
+            )
+            fake = CombinedLLM(config)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: fake
+            try:
+                translator = Translator(config)
+                translator.translate_file(src, tmp, Glossary())
+            finally:
+                translator_module.LLMClient = old
+            state_path = tmp / ".novel.translation_state.json"
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["txt_patterns"], [r"^\s*제\s*\d+\s*장"])
+            self.assertFalse(data["ignore_zero_chapters"])
+            self.assertEqual(data["chapter_titles"]["0"]["zh"], "第一章译")
+            self.assertEqual(data["chapter_titles"]["1"]["zh"], "第二章译")
+
+            restored = book_from_state(state_path, AppConfig(output_txt=False, output_epub=False))
+            self.assertEqual(restored.chapters[0].display_title, "第一章译")
+            self.assertEqual(restored.chapters[1].display_title, "第二章译")
+
+            audit = audit_title_translation(state_path)
+            self.assertTrue(audit["complete"])
+
+    def test_translate_file_export_uses_split_chinese_titles(self):
+        """导出 TXT 时，章节标题应使用 txt 分章后翻译出的中文标题，而不是韩语原标题。"""
+        class FakeLLM:
+            def __init__(self, config):
+                self.config = config
+
+            def chat(self, messages, *, temperature=None, json_mode=False):
+                user = str(messages[-1].get("content", ""))
+                if "【章节名列表】" in user:
+                    return '{"titles": {"0": "第一章译", "1": "第二章译"}}'
+                return '{"paragraphs": ["译文一"]}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "novel.txt"
+            src.write_text(
+                "제1장 시작\n" + "본문입니다. " * 30 + "\n제2장 전개\n" + "본문입니다. " * 30 + "\n",
+                encoding="utf-8",
+            )
+            config = AppConfig(
+                txt_patterns=[r"^\s*제\s*\d+\s*장"],
+                output_txt=True,
+                output_epub=False,
+                extract_glossary=False,
+                resume=False,
+            )
+            fake = FakeLLM(config)
+            old = translator_module.LLMClient
+            translator_module.LLMClient = lambda cfg: fake
+            try:
+                translator = Translator(config)
+                translator.translate_file(src, tmp, Glossary())
+            finally:
+                translator_module.LLMClient = old
+            txt_path = tmp / "novel.zh.txt"
+            exported = txt_path.read_text(encoding="utf-8")
+        self.assertIn("第一章译", exported)
+        self.assertIn("第二章译", exported)
+        self.assertNotIn("제1장", exported)
 
 
 

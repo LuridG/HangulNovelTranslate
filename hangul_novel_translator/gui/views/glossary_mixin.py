@@ -509,7 +509,11 @@ class GlossaryMixin:
                     ),
                 )
                 try:
-                    book = load_book(path)
+                    book = load_book(
+                        path,
+                        txt_patterns=config.txt_patterns,
+                        drop_zero=config.ignore_zero_chapters,
+                    )
                     sample = collect_sample_text_strided(book, config, sample_round=sample_round)
                     report = sample_chapter_report(book, config, sample_round=sample_round)
                     round_text = f"第{sample_round}轮" if sample_round else ""
@@ -618,7 +622,11 @@ class GlossaryMixin:
             source_text = self.glossary.source_text
             if self.input_files:
                 try:
-                    book = load_book(self.input_files[0])
+                    book = load_book(
+                        self.input_files[0],
+                        txt_patterns=config.txt_patterns,
+                        drop_zero=config.ignore_zero_chapters,
+                    )
                     source_text = "\n".join(ch.text for ch in book.chapters)
                 except Exception:  # noqa: BLE001
                     pass

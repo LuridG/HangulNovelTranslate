@@ -30,7 +30,9 @@ from .metadata import _needs_cjk_font_fallback
 from .markup import _outer_container_snapshot
 from .markup import _safe_tag_attrs
 from .text import _strip_invisible_chars
+from .txt import drop_zero_chapters
 from .txt import parse_txt
+from .txt import parse_txt_with_patterns
 
 
 def _href_basename(href: str) -> str:
@@ -377,9 +379,71 @@ def _collect_image_items(book) -> dict[str, bytes]:
 
     items: dict[str, bytes] = {}
     for item in book.get_items():
-        if item.get_type() == ITEM_IMAGE:
-            items[str(item.get_name())] = bytes(item.get_content())
+        media = str(getattr(item, "media_type", "") or "").lower()
+        if item.get_type() == ITEM_IMAGE or media.startswith("image/"):
+            try:
+                items[str(item.get_name())] = bytes(item.get_content())
+            except Exception:  # noqa: BLE001
+                continue
     return items
+
+
+
+def _manifest_cover_name(book, image_items: dict[str, bytes]) -> str | None:
+    """从 OPF 的 <meta name="cover"> 或 cover-image 声明找出封面图片包内路径。
+
+    封面常作为独立的 manifest 图片项（如 Sigil 或 Txt2Epub 写入的
+    properties="cover-image" / <meta name="cover">），并不内嵌进任何章节文档；
+    此时只靠章节里的 <img> 无法登记封面，需按 manifest 声明找回。webp 在
+    ebooklib 里常被识别为 ITEM_UNKNOWN，因此按 media-type 归类后再匹配。
+    """
+    if isinstance(book, dict):
+        return None
+    # 1) <meta name="cover" content="...">，content 通常是封面图 item id 或文件名。
+    metadata = getattr(book, "metadata", {}) or {}
+    cover_content = ""
+    for namespace, tags in metadata.items():
+        if not isinstance(tags, dict):
+            continue
+        for tag, entries in tags.items():
+            if tag != "meta" or not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, tuple) or len(entry) < 2:
+                    continue
+                attrs = entry[1]
+                if not isinstance(attrs, dict):
+                    continue
+                if str(attrs.get("name", "") or "").lower() != "cover":
+                    continue
+                content = str(attrs.get("content", "") or "").strip()
+                if content:
+                    cover_content = content
+                    break
+            if cover_content:
+                break
+        if cover_content:
+            break
+    if cover_content:
+        # content 可能是 item id（如 cover-img），也可能是文件名（如 xxlarge.webp）。
+        for item in book.get_items():
+            if str(item.get_id()) == cover_content:
+                name = str(item.get_name())
+                if name in image_items:
+                    return name
+        content_base = _href_basename(cover_content)
+        for name in image_items:
+            if _href_basename(name) == content_base:
+                return name
+        for name in image_items:
+            if name == cover_content or Path(name).name == cover_content:
+                return name
+        return None
+    # 2) 退而求其次：文件名本身像封面（cover 开头）。
+    for name in image_items:
+        if _looks_like_cover_image(name):
+            return name
+    return None
 
 
 
@@ -734,6 +798,13 @@ def parse_epub(path: Path, *, include_standalone_images: bool = True) -> Book:
             chapter.parent_index = index_by_basename.get(parent_basename)
 
     result = Book(title=title, chapters=chapters, source_path=path)
+    cover_name = _manifest_cover_name(book, image_items)
+    if cover_name:
+        registered = _register_image(cover_name, image_items, images_out)
+    else:
+        registered = ""
+    if registered:
+        result.metadata["cover_image"] = registered
     if doc_inline_css:
         result.metadata["doc_inline_css"] = doc_inline_css
     if chapter_css:
@@ -748,16 +819,23 @@ def parse_epub(path: Path, *, include_standalone_images: bool = True) -> Book:
 
 
 
-def load_book(path: Path) -> Book:
+def load_book(path: Path, *, txt_patterns=None, drop_zero: bool = False) -> Book:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在：{path}")
     suffix = path.suffix.lower()
     if suffix == ".txt":
-        return parse_txt(path)
-    if suffix == ".epub":
-        return parse_epub(path)
-    raise ValueError("目前只支持 .txt 和 .epub 文件")
+        if txt_patterns:
+            book = parse_txt_with_patterns(path, txt_patterns)
+        else:
+            book = parse_txt(path)
+    elif suffix == ".epub":
+        book = parse_epub(path)
+    else:
+        raise ValueError("目前只支持 .txt 和 .epub 文件")
+    if drop_zero:
+        book = drop_zero_chapters(book)
+    return book
 
 
 
@@ -1028,14 +1106,26 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
                 )
             )
     images = list(metadata.get("images") or [])
+    cover_hint = str(metadata.get("cover_image") or "").strip()
     cover_img = next(
         (
             img
             for img in images
-            if _looks_like_cover_image(str(img.get("name", ""))) and img.get("content")
+            if cover_hint
+            and str(img.get("name", "")) == cover_hint
+            and img.get("content")
         ),
         None,
     )
+    if cover_img is None:
+        cover_img = next(
+            (
+                img
+                for img in images
+                if _looks_like_cover_image(str(img.get("name", ""))) and img.get("content")
+            ),
+            None,
+        )
     for img in images:
         name = str(img.get("name", ""))
         if not name or any(it.file_name == name for it in out.items):
