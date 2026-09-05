@@ -16,4 +16,7 @@
 | 专有名词全书跨度采样（前/中/后分区、预算放大、轮次偏移） | `sampling.py` |
 | EPUB 导出期文本清洗管线（Export Sanitizer） | `sanitizer.py` |
 | 成品 EPUB 词表无损原地矫正 | `epub_fixer.py` |
+| 成品矫正：标题重分/重组、格式整理（检测/清理/新增制作说明与字数）、标题 CSS 排版 | `epub_correction.py` / `gui/` |
+| 成品矫正：标题补采（非正常章节登记 + 章节梳理） | `epub_title_supplement.py` / `gui/` |
+| 标题翻译/补翻与相似标题分组批量翻译 | `merge/state.py` / `gui/dialogs/title_block.py` |
 | 中文 EPUB 第一人称改第三人称（独立 Tab、失败块存档、原样复制资源） | `perspective/` / `gui/` |
