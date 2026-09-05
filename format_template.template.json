@@ -18,5 +18,10 @@
   "word_count_template": "(本章字数: ${chars})",
   "word_count_style": {},
   "title_enabled": false,
-  "title_style": {}
+  "title_style": {
+    "font_size": "1.4em",
+    "line_height": "1.4",
+    "letter_spacing": "0.05em",
+    "margin_bottom": "0.6em"
+  }
 }

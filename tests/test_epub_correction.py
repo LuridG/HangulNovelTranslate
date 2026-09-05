@@ -304,6 +304,26 @@ class FormatTemplateTest(unittest.TestCase):
         self.assertEqual(note[0], "章节 7")
         self.assertEqual(tpl.render_word_count(42), "《42》")
 
+    def test_preview_add_format_reports_existing_format(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = self._build(Path(td))
+            result = preview_add_format(src)
+            self.assertTrue(result["has_existing_format"])
+            self.assertGreaterEqual(result["existing_word_count_lines"], 2)
+            self.assertEqual(result["existing_production_count"], 0)
+
+    def test_title_style_defaults_and_decoration(self):
+        tpl = FormatTemplate()
+        self.assertIn("font_size", tpl.title_style)
+        self.assertIn("line_height", tpl.title_style)
+        styled = FormatTemplate(
+            title_enabled=True,
+            title_style={"text_decoration": "underline", "color": "#888888"},
+        )
+        css = styled.title_css()
+        self.assertIn("text-decoration:underline", css)
+        self.assertIn("color:#888888", css)
+
     def test_load_format_template_reads_json_and_falls_back(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "custom.json"

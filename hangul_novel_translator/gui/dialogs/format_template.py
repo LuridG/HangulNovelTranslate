@@ -17,6 +17,54 @@ def _str_value(value: object) -> str:
     return "" if value is None else str(value)
 
 
+_DECORATION_OPTIONS = ["无", "下划线", "删除线", "上划线"]
+_DECORATION_CSS = {
+    "无": "",
+    "下划线": "underline",
+    "删除线": "line-through",
+    "上划线": "overline",
+}
+
+
+def _decoration_label(css: str) -> str:
+    for label, value in _DECORATION_CSS.items():
+        if value == (css or ""):
+            return label
+    return "无"
+
+
+def _parse_font_size(value: object) -> float:
+    if not value:
+        return 16
+    text = str(value).strip()
+    try:
+        if text.endswith("em"):
+            return max(8, min(72, round(14 * float(text[:-2]), 1)))
+        if text.endswith("px"):
+            return max(8, min(72, round(float(text[:-2]) * 0.75, 1)))
+        return max(8, min(72, float(text)))
+    except Exception:  # noqa: BLE001
+        return 16
+
+
+def _margin_px(value: object) -> int:
+    if not value:
+        return 8
+    text = str(value).strip()
+    try:
+        if text.endswith("em"):
+            return max(0, int(round(14 * float(text[:-2]))))
+        if text.endswith("px"):
+            return max(0, int(round(float(text[:-2]))))
+        return max(0, int(round(float(text))))
+    except Exception:  # noqa: BLE001
+        return 8
+
+
+def _anchor_for(align: object) -> str:
+    return {"center": "center", "left": "w", "right": "e"}.get(align or "", "center")
+
+
 try:
     import customtkinter as ctk
 except ImportError as exc:  # pragma: no cover
@@ -125,6 +173,7 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
             "letter_spacing": tk.StringVar(value=_str_value(style.get("letter_spacing"))),
             "line_height": tk.StringVar(value=_str_value(style.get("line_height"))),
             "margin_bottom": tk.StringVar(value=_str_value(style.get("margin_bottom"))),
+            "decoration": tk.StringVar(value=_decoration_label(style.get("text_decoration"))),
         }
         ctk.CTkLabel(frame, text=label, width=86, anchor="w").grid(
             row=0, column=0, padx=(0, 6), sticky="w"
@@ -140,6 +189,11 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
         )
         ctk.CTkLabel(frame, text="颜色").grid(row=0, column=4, padx=(10, 4), sticky="w")
         self._build_color_picker(frame, style_vars["color"], col=5)
+        ctk.CTkLabel(frame, text="装饰").grid(row=0, column=7, padx=(8, 4), sticky="w")
+        ctk.CTkComboBox(
+            frame, values=_DECORATION_OPTIONS, variable=style_vars["decoration"], width=92,
+            state="readonly",
+        ).grid(row=0, column=8, padx=2, sticky="w")
 
         ctk.CTkLabel(frame, text="字号").grid(row=1, column=0, padx=(0, 4), sticky="w")
         ctk.CTkEntry(frame, textvariable=style_vars["font_size"], width=70).grid(
@@ -207,6 +261,11 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
             value = (vars.get(key) or "").get().strip() if vars.get(key) else ""
             if value:
                 style[key] = value
+        decoration = _DECORATION_CSS.get(
+            (vars.get("decoration") or "").get(), ""
+        ) if vars.get("decoration") else ""
+        if decoration:
+            style["text_decoration"] = decoration
         return style
 
     # ---------------- 制作说明页面 ----------------
@@ -346,18 +405,56 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
         preview_row = ctk.CTkFrame(page, fg_color="transparent")
         preview_row.grid(row=3, column=0, padx=0, pady=(0, 4), sticky="ew")
         ctk.CTkButton(
-            preview_row, text="预览标题 CSS", width=120, command=self._preview_title
+            preview_row, text="刷新预览", width=120, command=self._refresh_title_preview
         ).grid(row=0, column=0, sticky="w")
-        self.title_preview = ctk.CTkTextbox(page, height=160)
-        self.title_preview.grid(row=4, column=0, padx=0, pady=(0, 0), sticky="nsew")
+        self._build_title_visual(page)
+        self.title_preview = ctk.CTkTextbox(page, height=130)
+        self.title_preview.grid(row=5, column=0, padx=0, pady=(6, 0), sticky="nsew")
         self.title_preview.configure(state="disabled")
         page.grid_rowconfigure(4, weight=1)
         self._pages["title"] = page
+        self._bind_title_traces()
 
     def _on_title_switch(self):
-        self._preview_title()
+        self._refresh_title_preview()
 
-    def _preview_title(self):
+    def _build_title_visual(self, page):
+        self.title_visual = ctk.CTkFrame(page, fg_color=THEME["card"], corner_radius=6)
+        self.title_visual.grid(row=4, column=0, padx=0, pady=(0, 4), sticky="nsew")
+        self.title_visual.grid_columnconfigure(0, weight=1)
+        self.title_visual_label = ctk.CTkLabel(
+            self.title_visual, text="第一章 起因 (1)", anchor="center"
+        )
+        self.title_visual_label.grid(row=0, column=0, padx=12, pady=(10, 2), sticky="ew")
+        self.body_labels: list[ctk.CTkLabel] = []
+        for i, text in enumerate(
+            [
+                "这是正文第一段，用来演示标题排版的实时效果。",
+                "字号、行高、字间距、装饰线会在这里即时体现。",
+                "—— 下一章的标题也会沿用到同样的排版 ——",
+            ]
+        ):
+            lbl = ctk.CTkLabel(
+                self.title_visual, text=text, anchor="w",
+                text_color=THEME["text_main"], font=ctk.CTkFont(size=12),
+            )
+            lbl.grid(row=i + 1, column=0, padx=12, pady=1, sticky="w")
+            self.body_labels.append(lbl)
+
+    def _bind_title_traces(self):
+        for var in list(self.title_style_vars.values()):
+            try:
+                var.trace_add("write", lambda *a: self._refresh_title_preview())
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.title_enabled_var.trace_add(
+                "write", lambda *a: self._refresh_title_preview()
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_title_preview(self):
         tpl = self._current_template()
         css = tpl.title_css()
         if not css:
@@ -365,6 +462,27 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
         else:
             content = "标题样式（写入 Styles 下的 CSS 文件并关联 .chapter-title）：\n\n" + css
         self._render_preview(self.title_preview, content)
+        self._refresh_title_visual()
+
+    def _refresh_title_visual(self):
+        style = self._read_style(self.title_style_vars)
+        decoration = style.get("text_decoration") or ""
+        try:
+            font = ctk.CTkFont(
+                family=(style.get("font_family") or "Microsoft YaHei"),
+                size=_parse_font_size(style.get("font_size")),
+                weight="bold" if style.get("bold") else "normal",
+                slant="italic" if style.get("italic") else "roman",
+                underline="underline" in decoration,
+                overstrike="line-through" in decoration,
+            )
+        except Exception:  # noqa: BLE001
+            font = ctk.CTkFont(size=16, weight="bold")
+        self.title_visual_label.configure(
+            font=font,
+            text_color=(style.get("color") or THEME["text_main"]),
+            anchor=_anchor_for(style.get("align")),
+        )
 
     # ---------------- 通用 ----------------
     def _current_template(self) -> FormatTemplate:
@@ -400,7 +518,7 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
             self.wc_style_vars,
         ):
             self._reset_style_vars(style_vars)
-        self._preview_title()
+        self._refresh_title_preview()
 
     def _reset_style_vars(self, vars: dict):
         for key in (
@@ -420,6 +538,8 @@ class FormatTemplateEditDialog(ctk.CTkToplevel):
         ):
             if key in vars:
                 vars[key].set("")
+        if "decoration" in vars:
+            vars["decoration"].set("无")
 
     def _ok(self):
         tpl = self._current_template()

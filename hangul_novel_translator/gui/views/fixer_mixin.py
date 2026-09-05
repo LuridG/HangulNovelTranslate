@@ -896,10 +896,19 @@ class FixerMixin:
                 f"已开启，将写入独立样式表并关联到每个章节标题：\n"
                 f"{result.get('title_css') or ''}"
             )
+        existing_msg = ""
+        if result.get("has_existing_format"):
+            prod = result.get("existing_production_count", 0)
+            wc = result.get("existing_word_count_lines", 0)
+            existing_msg = (
+                f"\n\n⚠ 检测到已有格式：制作说明 {prod} 个、每章字数 {wc} 行。"
+                f"点击“是”将自动清理旧格式后再新增。"
+            )
         self._render_fixer_preview(self.fixer_format_preview, preview)
         ok = messagebox.askyesno(
             "确认新增",
-            "将按新版统计生成制作说明与每章字数，是否继续？",
+            "将按新版统计生成制作说明与每章字数，是否继续？"
+            + existing_msg,
             parent=self,
         )
         if not ok:

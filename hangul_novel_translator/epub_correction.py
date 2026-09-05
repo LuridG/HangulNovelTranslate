@@ -46,6 +46,12 @@ _DEFAULT_PRODUCTION_LINES = [
 _DEFAULT_PRODUCTION_STYLE: dict[str, Any] = {}
 _DEFAULT_WORD_COUNT_TEMPLATE = "(本章字数: ${chars})"
 _DEFAULT_WORD_COUNT_STYLE: dict[str, Any] = {}
+_DEFAULT_TITLE_STYLE: dict[str, Any] = {
+    "font_size": "1.4em",
+    "line_height": "1.4",
+    "letter_spacing": "0.05em",
+    "margin_bottom": "0.6em",
+}
 
 
 def _substitute_format(text: str, context: dict) -> str:
@@ -72,6 +78,7 @@ def _style_dict_to_css(style: dict | None) -> str:
         "font_family": ("font-family", lambda v: v),
         "bold": ("font-weight", lambda v: ("bold" if v else None)),
         "italic": ("font-style", lambda v: ("italic" if v else None)),
+        "text_decoration": ("text-decoration", lambda v: v),
         "margin_bottom": ("margin-bottom", lambda v: v),
         "margin": ("margin", lambda v: v),
         "letter_spacing": ("letter-spacing", lambda v: v),
@@ -119,7 +126,7 @@ class FormatTemplate:
     word_count_template: str = _DEFAULT_WORD_COUNT_TEMPLATE
     word_count_style: dict = field(default_factory=dict)
     title_enabled: bool = False
-    title_style: dict = field(default_factory=dict)
+    title_style: dict = field(default_factory=lambda: dict(_DEFAULT_TITLE_STYLE))
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +143,8 @@ class FormatTemplate:
     def from_dict(cls, data: dict) -> "FormatTemplate":
         if not isinstance(data, dict):
             return cls()
+        default_title_style = dict(_DEFAULT_TITLE_STYLE)
+        default_title_style.update(data.get("title_style") or {})
         return cls(
             production_title=(data.get("production_title") or _DEFAULT_PRODUCTION_TITLE),
             production_lines=(data.get("production_lines") or list(_DEFAULT_PRODUCTION_LINES)),
@@ -143,7 +152,7 @@ class FormatTemplate:
             word_count_template=(data.get("word_count_template") or _DEFAULT_WORD_COUNT_TEMPLATE),
             word_count_style=(data.get("word_count_style") or {}),
             title_enabled=bool(data.get("title_enabled")),
-            title_style=(data.get("title_style") or {}),
+            title_style=default_title_style,
         )
 
     def render_note(
@@ -452,6 +461,16 @@ def preview_add_format(
 ) -> dict[str, Any]:
     tpl = template or FormatTemplate()
     book = load_book(epub_path)
+    # 先统计源书是否已有制作说明 / 每章字数，供「新增格式」决定是否自动清理。
+    existing_production = [
+        ch for ch in book.chapters if _is_production_like(ch, tpl.production_title)
+    ]
+    existing_word_lines = sum(
+        1
+        for ch in book.chapters
+        for p in ch.paragraphs
+        if _is_word_count_line(p)
+    )
     book.chapters = [
         ch for ch in book.chapters if not _is_production_like(ch, tpl.production_title)
     ]
@@ -477,6 +496,9 @@ def preview_add_format(
         "note_body": note,
         "title_css": title_css,
         "title_css_enabled": bool(title_css),
+        "has_existing_format": bool(existing_production) or existing_word_lines > 0,
+        "existing_production_count": len(existing_production),
+        "existing_word_count_lines": existing_word_lines,
     }
 
 
