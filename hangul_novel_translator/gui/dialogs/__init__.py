@@ -9,6 +9,7 @@ from .sanitizer_rule import RuleEditDialog
 from .sanitizer_rule import SanitizerRuleDialog
 from .failed_chunk import FailedChunkEditorDialog
 from .malformed_block import MalformedBlockEditorDialog
+from .multiselect import MultiSelectDialog
 from .perspective_failed import PerspectiveFailedEditorDialog
 from .title_block import TitleTranslationDialog
 
@@ -17,6 +18,7 @@ __all__ = [
     'FormatTemplateEditDialog',
     'GlossaryEditDialog',
     'MalformedBlockEditorDialog',
+    'MultiSelectDialog',
     'PerspectiveFailedEditorDialog',
     'RetranslateResponseError',
     'RuleEditDialog',

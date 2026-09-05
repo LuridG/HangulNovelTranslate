@@ -39,6 +39,7 @@ from ...epub_correction import (
 from ...glossary import (Glossary, GlossaryEntry, _MIN_ALTERNATIVE_LEN, enrich_glossary_with_nicknames, extract_glossary_with_llm, extract_more_glossary)
 from ...llm import (LLMCancelled, LLMClient)
 from ...merge import (archive_filename_title, audit_translation_state, book_from_state, detect_merge_title, export_merged, inspect_state, merge_books, preview_fix, repair_image_state, review_translation_state)
+from ...epub_title_supplement import (analyze_abnormal_chapters, analyze_title_numbering, apply_organize_titles, apply_split_chapters, preview_organize_titles, preview_split_chapters)
 from ...perspective import (PerspectiveBlock, PerspectiveConverter, PerspectiveFailedBlock, PerspectiveOptions, inspect_perspective_epub, load_failed_perspective_blocks, load_perspective_state, perspective_state_path, reset_perspective_state, rewrite_blocks, save_perspective_failure, save_manual_perspective_translation)
 from ...translator import (FailedChunk, TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided, detect_malformed_blocks, format_sample_chapters, load_failed_chunks, reconcile_paragraphs, save_manual_translation, sample_chapter_report)
 from ...utils import (extract_json, parse_paragraphs_from_payload)
@@ -49,7 +50,7 @@ from ..state import (
     format_template_path,
 )
 from ..widgets import (TreeviewTooltip, DebouncedScrollableFrame)
-from ..dialogs import (FormatTemplateEditDialog, GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
+from ..dialogs import (FormatTemplateEditDialog, GlossaryEditDialog, MultiSelectDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
 
 
 try:
@@ -104,6 +105,7 @@ class FixerMixin:
         self._build_fixer_resplit_subtab(self.fixer_view.add("标题重分"))
         self._build_fixer_reassemble_subtab(self.fixer_view.add("标题重组"))
         self._build_fixer_format_subtab(self.fixer_view.add("格式整理"))
+        self._build_fixer_title_supplement_subtab(self.fixer_view.add("标题补采"))
         self.fixer_view.configure(
             corner_radius=6,
             border_width=0,
@@ -311,6 +313,99 @@ class FixerMixin:
         self.fixer_format_preview.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="nsew")
         self.fixer_format_preview.configure(state="disabled")
         tab.grid_rowconfigure(3, weight=1)
+
+
+    def _build_fixer_title_supplement_subtab(self, tab):
+        """标题补采：非正常章节登记（按字数+正则切分）+ 章节梳理（统一前缀/编号）。"""
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+        tab.grid_rowconfigure(6, weight=1)
+
+        ctk.CTkLabel(
+            tab,
+            text="针对转换时漏分出来的“大章”与无序前缀：先登记非正常章节并按正则补采切分，再梳理标题前缀与编号。",
+            text_color=THEME["text_muted"], anchor="w",
+        ).grid(row=0, column=0, padx=8, pady=(8, 0), sticky="w")
+
+        # 区块一：非正常章节登记
+        sec1 = ctk.CTkFrame(tab, fg_color="transparent")
+        sec1.grid(row=1, column=0, padx=8, pady=(8, 2), sticky="ew")
+        sec1.grid_columnconfigure(1, weight=1)
+        sec1.grid_columnconfigure(3, weight=2)
+        ctk.CTkLabel(sec1, text="阈值（%）").grid(row=0, column=0, padx=(4, 4), sticky="w")
+        self.fixer_supp_threshold_var = tk.StringVar(value="50")
+        ctk.CTkEntry(sec1, textvariable=self.fixer_supp_threshold_var, width=64).grid(
+            row=0, column=1, padx=4, sticky="w"
+        )
+        ctk.CTkLabel(sec1, text="补采正则").grid(row=0, column=2, padx=(14, 4), sticky="w")
+        self.fixer_supp_regex_var = tk.StringVar(value=r"^EP\.\s*\d+")
+        ctk.CTkEntry(sec1, textvariable=self.fixer_supp_regex_var).grid(
+            row=0, column=3, padx=4, sticky="ew"
+        )
+        self.fixer_supp_remove_wc_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            sec1, text="去除字数统计行", variable=self.fixer_supp_remove_wc_var,
+        ).grid(row=1, column=0, columnspan=4, padx=4, pady=(4, 0), sticky="w")
+
+        btn1 = ctk.CTkFrame(tab, fg_color="transparent")
+        btn1.grid(row=2, column=0, padx=8, pady=(2, 4), sticky="ew")
+        self._fixer_action_btn(
+            btn1, text="🔍 非正常章节登记", width=140,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"],
+            command=self._fixer_supp_analyze_async,
+        ).grid(row=0, column=0, padx=4)
+        self._fixer_action_btn(
+            btn1, text="章节补采预览", width=110, command=self._fixer_supp_preview_async,
+        ).grid(row=0, column=1, padx=4)
+        self._fixer_action_btn(
+            btn1, text="⚡ 执行补采", width=120,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"],
+            command=self._fixer_supp_run_async,
+        ).grid(row=0, column=2, padx=4)
+        self.fixer_supp_selected_label = ctk.CTkLabel(btn1, text="", anchor="w")
+        self.fixer_supp_selected_label.grid(row=0, column=3, padx=8, sticky="w")
+
+        self.fixer_supp_preview = ctk.CTkTextbox(tab, height=120)
+        self.fixer_supp_preview.grid(row=3, column=0, padx=8, pady=(0, 4), sticky="nsew")
+        self.fixer_supp_preview.configure(state="disabled")
+
+        # 区块二：章节梳理
+        sec2 = ctk.CTkFrame(tab, fg_color="transparent")
+        sec2.grid(row=4, column=0, padx=8, pady=(6, 2), sticky="ew")
+        sec2.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(sec2, text="标题前缀模板").grid(row=0, column=0, padx=(4, 4), sticky="w")
+        self.fixer_organize_prefix_var = tk.StringVar(value="第 {n} 章 ")
+        ctk.CTkEntry(sec2, textvariable=self.fixer_organize_prefix_var).grid(
+            row=0, column=1, padx=4, sticky="ew"
+        )
+        self.fixer_organize_use_orig_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            sec2, text="使用原本章节数字（否则按排序序号并保留原标题为内容）",
+            variable=self.fixer_organize_use_orig_var,
+        ).grid(row=1, column=0, columnspan=2, padx=4, pady=(4, 0), sticky="w")
+
+        btn2 = ctk.CTkFrame(tab, fg_color="transparent")
+        btn2.grid(row=5, column=0, padx=8, pady=(2, 4), sticky="ew")
+        self._fixer_action_btn(
+            btn2, text="🔎 检测章节编号", width=130,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"],
+            command=self._fixer_organize_analyze_async,
+        ).grid(row=0, column=0, padx=4)
+        self._fixer_action_btn(
+            btn2, text="预览梳理", width=100, command=self._fixer_organize_preview_async,
+        ).grid(row=0, column=1, padx=4)
+        self._fixer_action_btn(
+            btn2, text="⚡ 执行梳理", width=120,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"],
+            command=self._fixer_organize_run_async,
+        ).grid(row=0, column=2, padx=4)
+
+        self.fixer_organize_preview = ctk.CTkTextbox(tab, height=120)
+        self.fixer_organize_preview.grid(row=6, column=0, padx=8, pady=(0, 8), sticky="nsew")
+        self.fixer_organize_preview.configure(state="disabled")
+        self.fixer_supp_selected_indices: list[int] = []
 
 
     # ---------------- 导出清洗器 ----------------
@@ -933,5 +1028,237 @@ class FixerMixin:
         )
         if result.get("title_css"):
             msg += "\n已启用标题 CSS 排版（写入独立样式表并关联章节标题）。"
+        self.log(msg)
+        self._fixer_offer_switch(msg, output, src)
+
+
+    # ---------------- 标题补采：非正常章节登记 ----------------
+    def _fixer_supp_threshold(self) -> float:
+        try:
+            value = float(self.fixer_supp_threshold_var.get().strip())
+        except ValueError:
+            raise ValueError("阈值必须是数字") from None
+        if value <= 0 or value > 1000:
+            raise ValueError("阈值必须在 1~1000 之间")
+        return value
+
+
+    def _fixer_supp_analyze_async(self):
+        epub = self._fixer_require_path("登记提示")
+        if epub is None:
+            return
+        try:
+            threshold = self._fixer_supp_threshold()
+        except ValueError as exc:
+            messagebox.showwarning("提示", str(exc), parent=self)
+            return
+        self._fixer_dispatch(
+            lambda: analyze_abnormal_chapters(epub, threshold_pct=threshold),
+            self._on_fixer_supp_analyze_done,
+        )
+
+
+    def _on_fixer_supp_analyze_done(self, result):
+        self._fixer_set_busy(False)
+        self.status_var.set("非正常章节登记完成")
+        lines = [
+            f"正文章节 {result['content_count']} 个，基准字数约 {result['average']:.0f} 字，"
+            f"正常区间 [{result['lower']:.0f}, {result['upper']:.0f}]。",
+            f"疑似非正常章节 {result['abnormal_count']} 个。",
+            "",
+        ]
+        for c in result["abnormal"]:
+            lines.append(f"· 第 {c['index']} 章 · {c['title']}（{c['chars']} 字）")
+        if not result["abnormal"]:
+            lines.append("未发现疑似非正常章节。")
+        self._render_fixer_preview(self.fixer_supp_preview, "\n".join(lines))
+
+        abnormal = result["abnormal"]
+        if not abnormal:
+            messagebox.showinfo("提示", "未发现疑似非正常章节，无需补采。", parent=self)
+            return
+        items = [
+            (c["index"], f"第 {c['index']} 章 · {c['title']}（{c['chars']} 字）")
+            for c in abnormal
+        ]
+        dialog = MultiSelectDialog(
+            self,
+            "选择需要补采切分的疑似非正常章节",
+            items,
+            preselect=[c["index"] for c in abnormal],
+        )
+        self.wait_window(dialog)
+        if dialog.result is None:
+            self.status_var.set("已取消章节选择")
+            return
+        self.fixer_supp_selected_indices = list(dialog.result)
+        self.fixer_supp_selected_label.configure(
+            text=f"已选 {len(self.fixer_supp_selected_indices)} 章待补采"
+        )
+        self.status_var.set(f"已选择 {len(self.fixer_supp_selected_indices)} 个章节待补采")
+
+
+    def _fixer_supp_selected(self) -> list[int]:
+        if not self.fixer_supp_selected_indices:
+            raise ValueError("请先点“非正常章节登记”并选择章节")
+        return list(self.fixer_supp_selected_indices)
+
+
+    def _fixer_supp_preview_async(self):
+        epub = self._fixer_require_path("补采预览")
+        if epub is None:
+            return
+        pattern = self.fixer_supp_regex_var.get().strip()
+        if not pattern:
+            messagebox.showwarning("提示", "请输入补采正则", parent=self)
+            return
+        try:
+            indices = self._fixer_supp_selected()
+        except ValueError as exc:
+            messagebox.showwarning("提示", str(exc), parent=self)
+            return
+        remove_wc = self.fixer_supp_remove_wc_var.get()
+        self._fixer_dispatch(
+            lambda: preview_split_chapters(epub, pattern, indices, remove_word_count=remove_wc),
+            self._on_fixer_supp_preview_done,
+        )
+
+
+    def _on_fixer_supp_preview_done(self, result):
+        self._fixer_set_busy(False)
+        self.status_var.set("补采预检完成")
+        lines = [
+            f"选定 {result['selected']} 章，共拆出 {result['sub_chapter_count']} 个子章节：\n"
+        ]
+        for detail in result["details"]:
+            if detail["status"] == "no_match":
+                lines.append(f"· 第 {detail['index']} 章未命中正则（保持原样）")
+                continue
+            lines.append(f"· 第 {detail['index']} 章 → {len(detail['sub_chapters'])} 个子章节：")
+            for sub in detail["sub_chapters"]:
+                lines.append(f"    - {sub['title']}（{sub['paragraphs']} 段）")
+        self._render_fixer_preview(self.fixer_supp_preview, "\n".join(lines))
+
+
+    def _fixer_supp_run_async(self):
+        epub = self._fixer_require_path("执行补采")
+        if epub is None:
+            return
+        pattern = self.fixer_supp_regex_var.get().strip()
+        if not pattern:
+            messagebox.showwarning("提示", "请输入补采正则", parent=self)
+            return
+        try:
+            indices = self._fixer_supp_selected()
+        except ValueError as exc:
+            messagebox.showwarning("提示", str(exc), parent=self)
+            return
+        src = Path(epub)
+        mode = self.fixer_mode_var.get()
+        output, _ = self._fixer_output_path(src, mode, "_supplement")
+        remove_wc = self.fixer_supp_remove_wc_var.get()
+        self._fixer_dispatch(
+            lambda: apply_split_chapters(
+                epub, output, pattern, indices, remove_word_count=remove_wc
+            ),
+            lambda result: self._on_fixer_supp_run_done(result, output, src),
+        )
+
+
+    def _on_fixer_supp_run_done(self, result, output, src):
+        self._fixer_set_busy(False)
+        self.status_var.set("补采完成")
+        msg = (
+            f"标题补采完成：切分 {result['split_count']} 章，"
+            f"新增 {result['added_count']} 个子章节，全书共 {result['chapter_count']} 章。\n"
+            f"输出：{output}"
+        )
+        self.log(msg)
+        self.fixer_supp_selected_indices = []
+        self.fixer_supp_selected_label.configure(text="")
+        self._fixer_offer_switch(msg, output, src)
+
+
+    # ---------------- 标题补采：章节梳理 ----------------
+    def _fixer_organize_analyze_async(self):
+        epub = self._fixer_require_path("检测提示")
+        if epub is None:
+            return
+        self._fixer_dispatch(
+            lambda: analyze_title_numbering(epub),
+            self._on_fixer_organize_analyze_done,
+        )
+
+
+    def _on_fixer_organize_analyze_done(self, result):
+        self._fixer_set_busy(False)
+        self.status_var.set("章节编号检测完成")
+        lines = [
+            f"全书 {result['count']} 章，其中 {result['with_number']} 章标题含数字：\n"
+        ]
+        for r in result["records"][:80]:
+            num = r["number"] if r["number"] is not None else "无"
+            prefix = (r["prefix"] or "").strip()[:20]
+            lines.append(f"· 第 {r['index']} 章 数字={num} 前缀={prefix!r} 标题={r['title']!r}")
+        if result["count"] > 80:
+            lines.append(f"\n…（共 {result['count']} 章，仅展示前 80）")
+        self._render_fixer_preview(self.fixer_organize_preview, "\n".join(lines))
+
+
+    def _fixer_organize_preview_async(self):
+        epub = self._fixer_require_path("梳理预览")
+        if epub is None:
+            return
+        prefix = self.fixer_organize_prefix_var.get()
+        use_orig = self.fixer_organize_use_orig_var.get()
+        self._fixer_dispatch(
+            lambda: preview_organize_titles(
+                epub, prefix_template=prefix, use_original_number=use_orig
+            ),
+            self._on_fixer_organize_preview_done,
+        )
+
+
+    def _on_fixer_organize_preview_done(self, result):
+        self._fixer_set_busy(False)
+        self.status_var.set("梳理预览完成")
+        changed = [m for m in result["mapping"] if m["title"] != m["new_title"]]
+        unchanged = result["count"] - len(changed)
+        lines = [f"共 {result['count']} 章，{len(changed)} 处变化（{unchanged} 章保持不变）：\n"]
+        if not changed:
+            lines.append("（无标题变化，检查前缀模板或“使用原本章节数字”开关）")
+        for m in result["mapping"]:
+            if m["title"] != m["new_title"]:
+                lines.append(f"· [{m['seq']}] {m['title']} → {m['new_title']}")
+        self._render_fixer_preview(self.fixer_organize_preview, "\n".join(lines))
+
+
+    def _fixer_organize_run_async(self):
+        epub = self._fixer_require_path("执行梳理")
+        if epub is None:
+            return
+        prefix = self.fixer_organize_prefix_var.get().strip()
+        if not prefix:
+            messagebox.showwarning("提示", "请输入标题前缀模板", parent=self)
+            return
+        src = Path(epub)
+        mode = self.fixer_mode_var.get()
+        output, _ = self._fixer_output_path(src, mode, "_organized")
+        use_orig = self.fixer_organize_use_orig_var.get()
+        self._fixer_dispatch(
+            lambda: apply_organize_titles(
+                epub, output, prefix_template=prefix, use_original_number=use_orig
+            ),
+            lambda result: self._on_fixer_organize_run_done(result, output, src),
+        )
+
+
+    def _on_fixer_organize_run_done(self, result, output, src):
+        self._fixer_set_busy(False)
+        self.status_var.set("梳理完成")
+        msg = (
+            f"章节梳理完成：改写 {result['updated']} 个标题，全书共 {result['chapter_count']} 章。\n"
+            f"输出：{output}"
+        )
         self.log(msg)
         self._fixer_offer_switch(msg, output, src)
