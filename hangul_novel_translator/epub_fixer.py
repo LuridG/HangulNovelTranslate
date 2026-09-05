@@ -8,10 +8,12 @@ from __future__ import annotations
 import os
 import tempfile
 import zipfile
+import copy
 from pathlib import Path
 from typing import Any
 
 from bs4 import BeautifulSoup, NavigableString
+from .glossary import apply_replacement_pairs, merge_replacement_pairs
 
 
 def _is_html(name: str) -> bool:
@@ -20,10 +22,7 @@ def _is_html(name: str) -> bool:
 
 def _apply_pairs(text: str, pairs: list[tuple[str, str]]) -> str:
     """按 source 长度降序做全量替换（与 glossary.apply_replacements 等价）。"""
-    for src, dst in pairs:
-        if src and src in text:
-            text = text.replace(src, dst)
-    return text
+    return apply_replacement_pairs(text, pairs)
 
 
 def _pair_map(pairs: list[tuple[str, str]]) -> dict[str, str]:
@@ -33,14 +32,27 @@ def _pair_map(pairs: list[tuple[str, str]]) -> dict[str, str]:
 def preview_finished_epub(
     epub_path: str | Path,
     glossary: Any,
+    common_glossary: Any | None = None,
 ) -> dict[str, Any]:
     """扫描成品 EPUB，统计每个正文文件将发生的替换。
 
     返回 {"total_hits": int, "files": [{"file", "hits": {src: count}}], "lines": [str]}。
     """
     epub_path = Path(epub_path)
-    pairs = glossary.replacement_pairs()
-    result: dict[str, Any] = {"total_hits": 0, "files": [], "lines": []}
+    if common_glossary is None:
+        pairs, origin = glossary.replacement_pairs(), {}
+    else:
+        dedi = copy.deepcopy(glossary)
+        if hasattr(dedi, "apply_common_override"):
+            dedi.apply_common_override(common_glossary)
+        pairs, origin = merge_replacement_pairs(dedi, common_glossary)
+    result: dict[str, Any] = {
+        "total_hits": 0,
+        "files": [],
+        "lines": [],
+        "common_hits": 0,
+        "dedicated_hits": 0,
+    }
     if not pairs:
         return result
     dst_map = _pair_map(pairs)
@@ -66,8 +78,14 @@ def preview_finished_epub(
                 result["files"].append({"file": item.filename, "hits": hits})
                 for src, count in hits.items():
                     result["total_hits"] += count
+                    is_common = origin.get(src) == "common"
+                    tag = "通用" if is_common else "专用"
+                    if is_common:
+                        result["common_hits"] += count
+                    else:
+                        result["dedicated_hits"] += count
                     result["lines"].append(
-                        f'[{item.filename}] "{src}" -> "{dst_map.get(src, "")}" '
+                        f'[{item.filename}] {tag} "{src}" -> "{dst_map.get(src, "")}" '
                         f"(出现 {count} 次)"
                     )
     return result
@@ -77,6 +95,7 @@ def fix_finished_epub_in_place(
     epub_path: str | Path,
     glossary: Any,
     output_path: str | Path,
+    common_glossary: Any | None = None,
 ) -> dict[str, Any]:
     """对成品 EPUB 执行原地词表无损修正，返回统计。
 
@@ -84,8 +103,16 @@ def fix_finished_epub_in_place(
     """
     epub_path = Path(epub_path)
     output_path = Path(output_path)
-    pairs = glossary.replacement_pairs()
-    stats: dict[str, Any] = {"hit_count": 0, "modified_files": 0, "files": []}
+    override_count = 0
+    if common_glossary is not None and hasattr(glossary, "apply_common_override"):
+        override_count = glossary.apply_common_override(common_glossary)
+    pairs, _ = merge_replacement_pairs(glossary, common_glossary)
+    stats: dict[str, Any] = {
+        "hit_count": 0,
+        "modified_files": 0,
+        "files": [],
+        "common_override_count": override_count,
+    }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # 先写到同目录临时文件，成功后再原子替换，避免原地覆盖时读写同一路径。

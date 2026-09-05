@@ -8,6 +8,7 @@ from hangul_novel_translator.epub_fixer import (
     fix_finished_epub_in_place,
     preview_finished_epub,
 )
+from hangul_novel_translator.glossary import Glossary, GlossaryEntry
 
 
 class FakeGlossary:
@@ -128,6 +129,58 @@ class TestEpubFixer(unittest.TestCase):
                 self.assertIn("<p>俊熙</p>", content)
                 self.assertIn("content:'俊希'", content)
                 self.assertIn("var x='俊希';", content)
+
+
+class TestEpubFixerCommonGlossary(unittest.TestCase):
+    def _build_epub_with(self, text: str) -> bytes:
+        html = f"<html><body><p>{text}</p></body></html>".encode("utf-8")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            mi = zipfile.ZipInfo("mimetype")
+            mi.compress_type = zipfile.ZIP_STORED
+            zf.writestr(mi, b"application/epub+zip")
+            zf.writestr("OEBPS/chapter.xhtml", html)
+        buf.seek(0)
+        return buf.getvalue()
+
+    def test_preview_reports_common_and_dedicated(self):
+        dedicated = Glossary(entries=[
+            GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希"),
+        ])
+        common = Glossary(entries=[
+            GlossaryEntry(ko="", zh="外传", confirmed=True, alternatives="番外"),
+            GlossaryEntry(ko="범진", zh="范镇", confirmed=True),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "book.epub"
+            src.write_bytes(self._build_epub_with("番外 俊希 范镇"))
+            result = preview_finished_epub(src, dedicated, common)
+            self.assertGreaterEqual(result["common_hits"], 1)  # 番外 -> 外传
+            self.assertGreaterEqual(result["dedicated_hits"], 1)  # 俊希 -> 俊熙
+            joined = "\n".join(result["lines"])
+            self.assertIn("通用", joined)
+            self.assertIn("专用", joined)
+
+    def test_fix_merges_and_overrides_dedicated(self):
+        dedicated = Glossary(entries=[
+            GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希"),
+        ])
+        common = Glossary(entries=[
+            GlossaryEntry(ko="준희", zh="俊熙（通用）", confirmed=True, alternatives="俊希"),
+            GlossaryEntry(ko="", zh="外传", confirmed=True, alternatives="番外"),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "book.epub"
+            src.write_bytes(self._build_epub_with("俊希 님은 番外 中"))
+            out = Path(tmp) / "book_fixed.epub"
+            stats = fix_finished_epub_in_place(src, dedicated, out, common)
+            self.assertEqual(stats["common_override_count"], 1)
+            with zipfile.ZipFile(out, "r") as zcheck:
+                content = zcheck.read("OEBPS/chapter.xhtml").decode("utf-8")
+                self.assertIn("俊熙（通用）", content)
+                self.assertIn("外传", content)
+                self.assertNotIn("俊希", content)
+                self.assertNotIn("番外", content)
 
 
 if __name__ == "__main__":

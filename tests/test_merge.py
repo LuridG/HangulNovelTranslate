@@ -503,5 +503,51 @@ class ArchiveFilenameTitleTest(unittest.TestCase):
         self.assertEqual(archive_filename_title(Path("烟灰.translation_state.json")), "烟灰")
 
 
+class MergeCommonGlossaryTest(unittest.TestCase):
+    def _books(self, text: str) -> list[Book]:
+        return [Book(title="卷一", chapters=[Chapter(0, "第1章", [text])])]
+
+    def test_preview_fix_reports_common_and_dedicated(self):
+        book = self._books("俊希 范振 番外")[0]
+        dedicated = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希"),
+                GlossaryEntry(ko="범진", zh="范镇", confirmed=True, alternatives="范振"),
+            ]
+        )
+        common = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙（通用）", confirmed=True, alternatives="俊希"),
+                GlossaryEntry(ko="", zh="外传", confirmed=True, alternatives="番外"),
+            ]
+        )
+        stats = preview_fix(book, dedicated, common)
+        self.assertEqual(stats["hit_paragraphs"], 1)
+        self.assertGreaterEqual(stats["common_sources"], 1)
+        self.assertGreaterEqual(stats["dedicated_sources"], 1)
+        # 预检不应修改正文
+        self.assertEqual(book.chapters[0].paragraphs[0], "俊希 范振 番外")
+
+    def test_fix_book_applies_common_and_overrides(self):
+        book = self._books("俊希 范振 番外")[0]
+        dedicated = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希"),
+                GlossaryEntry(ko="범진", zh="范镇", confirmed=True, alternatives="范振"),
+            ]
+        )
+        common = Glossary(
+            entries=[
+                GlossaryEntry(ko="준희", zh="俊熙（通用）", confirmed=True, alternatives="俊希"),
+                GlossaryEntry(ko="", zh="外传", confirmed=True, alternatives="番外"),
+            ]
+        )
+        stats = fix_book(book, dedicated, common)
+        self.assertEqual(stats["common_override_count"], 1)
+        self.assertEqual(book.chapters[0].paragraphs[0], "俊熙（通用） 范镇 外传")
+        by_ko = {e.ko: e for e in dedicated.entries}
+        self.assertEqual(by_ko["준희"].zh, "俊熙（通用）")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,7 @@ from ...perspective import (PerspectiveBlock, PerspectiveConverter, PerspectiveF
 from ...translator import (FailedChunk, TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided, detect_malformed_blocks, format_sample_chapters, load_failed_chunks, reconcile_paragraphs, save_manual_translation, sample_chapter_report)
 from ...utils import (extract_json, parse_paragraphs_from_payload)
 from ..theme import (THEME, _apply_ttk_theme)
-from ..state import (_load_ui_state, _save_ui_state)
+from ..state import (_load_ui_state, _save_ui_state, common_glossary_path)
 from ..widgets import (TreeviewTooltip, DebouncedScrollableFrame)
 from ..dialogs import (GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
 
@@ -490,6 +490,10 @@ class ShellMixin:
             state["app_config"] = self._config_from_ui().to_dict()
             state["output"] = self.output_var.get().strip()
             _save_ui_state(state)
+        except Exception:
+            pass
+        try:
+            self.common_glossary.save(common_glossary_path())
         except Exception:
             pass
         if self.worker and self.worker.is_alive():

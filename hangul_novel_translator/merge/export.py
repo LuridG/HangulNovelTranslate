@@ -20,12 +20,13 @@ def export_merged(
     title: str = "合集",
     output_txt: bool = True,
     output_epub: bool = True,
+    common_glossary: Glossary | None = None,
 ) -> dict[str, Any]:
     """合并多卷 → 按词表修正 → 输出 TXT/EPUB，返回统计与输出路径。"""
     if not books:
         raise ValueError("没有可合并的存档")
     merged = merge_books(books, title=title)
-    fix_stats = fix_book(merged, glossary)
+    fix_stats = fix_book(merged, glossary, common_glossary)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     sanitizer = ExportSanitizer(config.sanitizer_config)

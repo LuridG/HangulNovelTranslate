@@ -26,7 +26,7 @@ from ...perspective import (PerspectiveBlock, PerspectiveConverter, PerspectiveF
 from ...translator import (FailedChunk, TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided, detect_malformed_blocks, format_sample_chapters, load_failed_chunks, reconcile_paragraphs, save_manual_translation, sample_chapter_report)
 from ...utils import (extract_json, parse_paragraphs_from_payload)
 from ..theme import (THEME, _apply_ttk_theme)
-from ..state import (_load_ui_state, _save_ui_state)
+from ..state import (_load_ui_state, _save_ui_state, common_glossary_path)
 from ..widgets import (TreeviewTooltip, DebouncedScrollableFrame)
 from ..dialogs import (GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
 
@@ -43,16 +43,54 @@ class GlossaryMixin:
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.grid(row=0, column=0, padx=12, pady=(14, 6), sticky="ew")
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="专有名词词表", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(header, text="⚡ 提取词表", width=96, fg_color=THEME["primary"], hover_color=THEME["primary_hover"], command=self._extract_glossary_async).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(header, text="提取更多词表", width=110, command=self._extract_more_glossary_async).grid(row=0, column=4, padx=4)
-        ctk.CTkButton(header, text="完善信息", width=90, command=self._enrich_glossary_async).grid(row=0, column=5, padx=4)
+        self.glossary_mode = "dedicated"
+        self.glossary_title_label = ctk.CTkLabel(
+            header, text="专有名词词表（专用）", font=ctk.CTkFont(size=16, weight="bold")
+        )
+        self.glossary_title_label.grid(row=0, column=0, sticky="w")
+        self.glossary_mode_btn = ctk.CTkButton(
+            header, text="通用词表", width=88,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._toggle_glossary_mode,
+        )
+        self.glossary_mode_btn.grid(row=0, column=1, padx=4)
+        self._extract_btn = ctk.CTkButton(
+            header, text="⚡ 提取词表", width=96,
+            fg_color=THEME["primary"], hover_color=THEME["primary_hover"],
+            command=self._extract_glossary_async,
+        )
+        self._extract_btn.grid(row=0, column=2, padx=4)
+        ctk.CTkButton(
+            header, text="💾 保存词表", width=92,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._save_glossary,
+        ).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(
+            header, text="📂 加载词表", width=92,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._load_glossary,
+        ).grid(row=0, column=4, padx=4)
+        self._extract_more_btn = ctk.CTkButton(
+            header, text="提取更多词表", width=110, command=self._extract_more_glossary_async,
+        )
+        self._extract_more_btn.grid(row=0, column=5, padx=4)
+        self._enrich_btn = ctk.CTkButton(
+            header, text="完善信息", width=90, command=self._enrich_glossary_async,
+        )
+        self._enrich_btn.grid(row=0, column=6, padx=4)
         self.enrich_alts_var = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(header, text="补可能译法", variable=self.enrich_alts_var).grid(row=0, column=6, padx=(6, 0))
+        self._enrich_alts_chk = ctk.CTkCheckBox(header, text="补可能译法", variable=self.enrich_alts_var)
+        self._enrich_alts_chk.grid(row=0, column=7, padx=(6, 0))
         self.enrich_nick_var = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(header, text="检测昵称", variable=self.enrich_nick_var).grid(row=0, column=7, padx=(0, 4))
-        ctk.CTkButton(header, text="💾 保存词表", width=92, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._save_glossary).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(header, text="📂 加载词表", width=92, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._load_glossary).grid(row=0, column=3, padx=4)
+        self._enrich_nick_chk = ctk.CTkCheckBox(header, text="检测昵称", variable=self.enrich_nick_var)
+        self._enrich_nick_chk.grid(row=0, column=8, padx=(0, 4))
+        self._glossary_llm_widgets = [
+            self._extract_btn,
+            self._extract_more_btn,
+            self._enrich_btn,
+            self._enrich_alts_chk,
+            self._enrich_nick_chk,
+        ]
 
         tree_frame = ctk.CTkFrame(parent)
         tree_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="nsew")
@@ -112,19 +150,71 @@ class GlossaryMixin:
         ctk.CTkButton(actions, text="新增", width=70, command=self._add_entry).grid(row=0, column=0, padx=4)
         ctk.CTkButton(actions, text="✎ 编辑", width=76, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._edit_selected).grid(row=0, column=1, padx=4)
         ctk.CTkButton(actions, text="✕ 删除", width=76, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._remove_selected).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(actions, text="✓ 确认选中", width=96, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._confirm_selected).grid(row=0, column=3, padx=4)
+        self.confirm_selected_btn = ctk.CTkButton(
+            actions, text="✓ 确认选中", width=112,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"], command=self._confirm_selected,
+        )
+        self.confirm_selected_btn.grid(row=0, column=3, padx=4)
         ctk.CTkButton(actions, text="✓✓ 全部确认", width=100, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._confirm_all).grid(row=0, column=4, padx=4)
         ctk.CTkButton(actions, text="🧹 清理重复", width=96, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._cleanup_duplicates).grid(row=0, column=5, padx=4)
         ctk.CTkButton(actions, text="🗑 清空词表", width=96, fg_color=THEME["secondary"], hover_color=THEME["danger"], border_width=1, border_color=THEME["card_border"], command=self._clear_glossary).grid(row=0, column=6, padx=4)
         self.count_label = ctk.CTkLabel(actions, text="0 条")
         self.count_label.grid(row=0, column=7, padx=12, sticky="e")
+        self._update_glossary_controls()
 
 
     # ---------------- 词表 ----------------
+    def _current_glossary(self):
+        return self.common_glossary if self.glossary_mode == "common" else self.glossary
+
+
+    def _update_glossary_controls(self):
+        """根据当前是专用/通用词表，切换标题、按钮与可用操作。"""
+        common = self.glossary_mode == "common"
+        self.glossary_title_label.configure(text="通用词表" if common else "专有名词词表（专用）")
+        self.glossary_mode_btn.configure(text="专用词表" if common else "通用词表")
+        for widget in self._glossary_llm_widgets:
+            widget.configure(state="disabled" if common else "normal")
+        if common:
+            self.confirm_selected_btn.configure(text="✓ 确认选中", command=self._confirm_selected)
+        else:
+            self.confirm_selected_btn.configure(text="＋ 追加到通用词表", command=self._append_selected_to_common)
+
+
+    def _toggle_glossary_mode(self):
+        self.glossary_mode = "common" if self.glossary_mode == "dedicated" else "dedicated"
+        self._refresh_tree()
+        self._update_glossary_controls()
+
+
+    def _append_selected_to_common(self):
+        """把专用词表选中的词条追加到通用词表；相同 ko 保留通用词表译名（通用词表为主）。"""
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("提示", "请先选择要追加到通用词表的词条（可多选）", parent=self)
+            return
+        selected_kos = {str(self.tree.item(i, "values")[0]) for i in selection}
+        entries = [e for e in self.glossary.entries if e.ko in selected_kos and e.zh]
+        if not entries:
+            messagebox.showwarning("提示", "选中的词条缺少中文译名，无法追加", parent=self)
+            return
+        added, skipped = self.common_glossary.append_unique(entries)
+        self.common_glossary.save(common_glossary_path())
+        self.log(f"已追加 {added} 条到通用词表（跳过已存在 {skipped} 条）")
+        messagebox.showinfo(
+            "完成",
+            f"已将 {added} 条加入通用词表，跳过已存在 {skipped} 条。\n"
+            "通用词表的确认译名将在后续修正中优先覆盖专用词表。",
+            parent=self,
+        )
+
+
     def _refresh_tree(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for e in self.glossary.entries:
+        glossary = self._current_glossary()
+        for e in glossary.entries:
             alts_display = e.alternatives
             if e.alternatives and e.replace_short:
                 alts_display = "含短称|" + e.alternatives
@@ -133,7 +223,8 @@ class GlossaryMixin:
                 "end",
                 values=(e.ko, e.zh, e.kind, e.note, alts_display, "✓" if e.confirmed else ""),
             )
-        self.count_label.configure(text=f"{len(self.glossary.valid_entries())} 条有效词条")
+        valid = len(glossary.valid_entries(allow_missing_ko=(self.glossary_mode == "common")))
+        self.count_label.configure(text=f"{valid} 条有效词条")
         if self.sort_col:
             self._apply_sort()
 
@@ -180,11 +271,14 @@ class GlossaryMixin:
 
 
     def _add_entry(self):
-        dialog = GlossaryEditDialog(self)
+        dialog = GlossaryEditDialog(self, require_ko=(self.glossary_mode == "dedicated"))
         self.wait_window(dialog)
         if dialog.result:
-            self.glossary.upsert(dialog.result)
+            glossary = self._current_glossary()
+            glossary.upsert(dialog.result)
             self._refresh_tree()
+            if self.glossary_mode == "common":
+                self.common_glossary.save(common_glossary_path())
             self.log(f"已添加词条：{dialog.result.ko} -> {dialog.result.zh}")
 
 
@@ -193,20 +287,26 @@ class GlossaryMixin:
         if not ko:
             messagebox.showinfo("提示", "请先选择一个词条", parent=self)
             return
-        entry = next((e for e in self.glossary.entries if e.ko == ko), None)
-        dialog = GlossaryEditDialog(self, entry)
+        glossary = self._current_glossary()
+        entry = next((e for e in glossary.entries if e.ko == ko), None)
+        dialog = GlossaryEditDialog(self, entry, require_ko=(self.glossary_mode == "dedicated"))
         self.wait_window(dialog)
         if dialog.result:
-            self.glossary.upsert(dialog.result)
+            glossary.upsert(dialog.result)
             self._refresh_tree()
+            if self.glossary_mode == "common":
+                self.common_glossary.save(common_glossary_path())
 
 
     def _remove_selected(self):
         ko = self._selected_ko()
         if not ko:
             return
-        self.glossary.remove(ko)
+        glossary = self._current_glossary()
+        glossary.remove(ko)
         self._refresh_tree()
+        if self.glossary_mode == "common":
+            self.common_glossary.save(common_glossary_path())
 
 
     def _confirm_selected(self):
@@ -214,29 +314,40 @@ class GlossaryMixin:
         if not selection:
             messagebox.showinfo("提示", "请先选择要确认的词条（可多选）", parent=self)
             return
+        glossary = self._current_glossary()
         selected_kos = {str(self.tree.item(i, "values")[0]) for i in selection}
-        changed = sum(1 for e in self.glossary.entries if e.ko in selected_kos and not e.confirmed)
-        for e in self.glossary.entries:
+        changed = sum(1 for e in glossary.entries if e.ko in selected_kos and not e.confirmed)
+        for e in glossary.entries:
             if e.ko in selected_kos:
                 e.confirmed = True
         self._refresh_tree()
+        if self.glossary_mode == "common":
+            self.common_glossary.save(common_glossary_path())
         self.log(f"已确认 {len(selected_kos)} 条（新增 {changed} 条）")
 
 
     def _confirm_all(self):
-        if not self.glossary.entries:
+        glossary = self._current_glossary()
+        if not glossary.entries:
             messagebox.showinfo("提示", "当前没有词表", parent=self)
             return
-        changed = sum(1 for e in self.glossary.entries if not e.confirmed)
-        for e in self.glossary.entries:
+        changed = sum(1 for e in glossary.entries if not e.confirmed)
+        for e in glossary.entries:
             e.confirmed = True
         self._refresh_tree()
-        self.log(f"已全部确认：{len(self.glossary.entries)} 条（新增 {changed} 条）")
+        if self.glossary_mode == "common":
+            self.common_glossary.save(common_glossary_path())
+        self.log(f"已全部确认：{len(glossary.entries)} 条（新增 {changed} 条）")
 
 
     def _save_glossary(self):
-        if not self.glossary.entries:
+        glossary = self._current_glossary()
+        if not glossary.entries:
             messagebox.showinfo("提示", "当前没有词表可保存", parent=self)
+            return
+        if self.glossary_mode == "common":
+            self.common_glossary.save(common_glossary_path())
+            self.log(f"通用词表已保存：{common_glossary_path()}")
             return
         path = filedialog.asksaveasfilename(
             title="保存词表",
@@ -244,23 +355,76 @@ class GlossaryMixin:
             filetypes=[("JSON", "*.json")],
         )
         if path:
-            self.glossary.save(Path(path))
+            glossary.save(Path(path))
             self.log(f"词表已保存：{path}")
 
 
     def _load_glossary(self):
-        path = filedialog.askopenfilename(title="加载词表", filetypes=[("JSON", "*.json")])
-        if path:
-            self.glossary = Glossary.load(Path(path))
-            removed = self.glossary.dedupe()
-            self._refresh_tree()
-            detail = f"，清理重复 {removed} 条" if removed else ""
-            self.log(f"词表已加载：{path}，共 {len(self.glossary.entries)} 条{detail}")
+        kwargs: dict[str, Any] = {
+            "title": "加载词表",
+            "filetypes": [("JSON", "*.json")],
+        }
+        if self.glossary_mode == "common":
+            kwargs["initialdir"] = str(Path(common_glossary_path()).parent)
+        path = filedialog.askopenfilename(**kwargs)
+        if not path:
+            return
+        path = Path(path)
+        is_common_file = self._looks_like_common_glossary(path)
 
+        if self.glossary_mode == "common" and not is_common_file:
+            # 在「通用词表」界面却选了不像通用表的文件 → 询问是否为专用词表。
+            is_dedicated = messagebox.askyesno(
+                "加载词表",
+                "当前位于「通用词表」界面，但所选文件不像通用词表。\n\n"
+                "该文件是否属于「专用词表」？\n"
+                "选择“是”将切换到专用词表界面并加载；选择“否”将作为通用词表加载。",
+                parent=self,
+            )
+            if is_dedicated:
+                self.glossary_mode = "dedicated"
+                self._update_glossary_controls()
+                glossary = Glossary.load(path)
+                removed = glossary.dedupe()
+                self.glossary = glossary
+                self._refresh_tree()
+                detail = f"，清理重复 {removed} 条" if removed else ""
+                self.log(f"词表已加载：{path}，共 {len(glossary.entries)} 条{detail}")
+                return
+        elif self.glossary_mode == "dedicated" and is_common_file:
+            # 在「专用词表」界面却识别到通用词表 → 自动切换到通用词表界面。
+            self.glossary_mode = "common"
+            self._update_glossary_controls()
+
+        glossary = Glossary.load(path)
+        removed = glossary.dedupe()
+        if self.glossary_mode == "common":
+            self.common_glossary = glossary
+            self.common_glossary.save(common_glossary_path())
+        else:
+            self.glossary = glossary
+        self._refresh_tree()
+        detail = f"，清理重复 {removed} 条" if removed else ""
+        self.log(f"词表已加载：{path}，共 {len(glossary.entries)} 条{detail}")
+
+
+    def _looks_like_common_glossary(self, path) -> bool:
+        """判断文件是否更像“通用词表”。
+
+        先按固定文件名匹配；否则看内容特征：专用词表不允许 ko 为空，
+        存在“无韩文原文但有可匹配来源”的词条即可判定为通用词表。
+        """
+        try:
+            if Path(path).resolve() == common_glossary_path().resolve():
+                return True
+            return Glossary.load(Path(path)).looks_common()
+        except Exception:  # noqa: BLE001
+            return False
 
     def _clear_glossary(self):
         """清空当前词表，便于换一本新书重新提取。"""
-        if not self.glossary.entries:
+        glossary = self._current_glossary()
+        if not glossary.entries:
             messagebox.showinfo("提示", "当前词表已是空的", parent=self)
             return
         if not messagebox.askyesno(
@@ -269,7 +433,11 @@ class GlossaryMixin:
             parent=self,
         ):
             return
-        self.glossary = Glossary()
+        if self.glossary_mode == "common":
+            self.common_glossary = Glossary()
+            self.common_glossary.save(common_glossary_path())
+        else:
+            self.glossary = Glossary()
         self._refresh_tree()
         self.log("词表已清空")
 
@@ -493,11 +661,14 @@ class GlossaryMixin:
 
 
     def _cleanup_duplicates(self):
-        if not self.glossary.entries:
+        glossary = self._current_glossary()
+        if not glossary.entries:
             messagebox.showinfo("提示", "当前没有词表", parent=self)
             return
-        removed = self.glossary.dedupe()
+        removed = glossary.dedupe()
         self._refresh_tree()
+        if self.glossary_mode == "common":
+            self.common_glossary.save(common_glossary_path())
         if removed:
             self.log(f"已清理重复词条：{removed} 条")
             messagebox.showinfo("完成", f"已清理 {removed} 条重复词条。", parent=self)

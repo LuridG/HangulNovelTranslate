@@ -1,8 +1,9 @@
 # 由 tools/split_package.py 拆分生成
 from __future__ import annotations
+import copy
 from typing import Any
 from ..book import (Book, Chapter, ParagraphStyle, _href_basename, book_to_txt, export_epub, load_book, metadata_from_dict, metadata_to_dict, parse_epub)
-from ..glossary import Glossary
+from ..glossary import Glossary, apply_replacement_pairs, merge_replacement_pairs
 from .resources import _merge_static_resources
 from .resources import _rewrite_image_markers
 
@@ -89,25 +90,67 @@ def merge_books(books: list[Book], *, title: str = "") -> Book:
 
 
 
-def preview_fix(book: Book, glossary: Glossary) -> dict[str, int]:
-    """只统计不修改：返回预计命中的段落数与写法数。"""
-    pairs = glossary.replacement_pairs()
+def _apply_pairs(text: str, pairs: list[tuple[str, str]]) -> str:
+    return apply_replacement_pairs(text, pairs)
+
+
+def preview_fix(
+    book: Book,
+    glossary: Glossary,
+    common_glossary: Glossary | None = None,
+) -> dict[str, int]:
+    """只统计不修改：返回预计命中的段落数、旧写法数与通用/专用来源数。"""
+    if common_glossary is None:
+        pairs, origin = glossary.replacement_pairs(), {}
+    else:
+        dedi = copy.deepcopy(glossary)
+        if hasattr(dedi, "apply_common_override"):
+            dedi.apply_common_override(common_glossary)
+        pairs, origin = merge_replacement_pairs(dedi, common_glossary)
     hit_paragraphs = 0
     hit_sources: set[str] = set()
+    common_sources: set[str] = set()
+    dedicated_sources: set[str] = set()
     for chapter in book.chapters:
         for paragraph in chapter.paragraphs:
             matched = [src for src, _ in pairs if src and src in paragraph]
             if matched:
                 hit_paragraphs += 1
-                hit_sources.update(matched)
-    return {"hit_paragraphs": hit_paragraphs, "hit_sources": len(hit_sources)}
+                for src in matched:
+                    hit_sources.add(src)
+                    if origin.get(src) == "common":
+                        common_sources.add(src)
+                    else:
+                        dedicated_sources.add(src)
+    return {
+        "hit_paragraphs": hit_paragraphs,
+        "hit_sources": len(hit_sources),
+        "common_sources": len(common_sources),
+        "dedicated_sources": len(dedicated_sources),
+    }
 
 
-
-def fix_book(book: Book, glossary: Glossary) -> dict[str, int]:
-    """按当前词表对译文做机器修正，返回实际替换统计。"""
-    preview = preview_fix(book, glossary)
+def fix_book(
+    book: Book,
+    glossary: Glossary,
+    common_glossary: Glossary | None = None,
+) -> dict[str, int]:
+    """按当前词表对译文做机器修正（自动追加通用词表），返回实际替换统计。"""
+    override_count = 0
+    if common_glossary is not None and hasattr(glossary, "apply_common_override"):
+        override_count = glossary.apply_common_override(common_glossary)
+    pairs, _ = merge_replacement_pairs(glossary, common_glossary)
+    hit_paragraphs = 0
+    hit_sources: set[str] = set()
     for chapter in book.chapters:
         for i, paragraph in enumerate(chapter.paragraphs):
-            chapter.paragraphs[i] = glossary.apply_replacements(paragraph)
-    return {"hit_paragraphs": preview["hit_paragraphs"], "hit_sources": preview["hit_sources"]}
+            matched = [src for src, _ in pairs if src and src in paragraph]
+            if matched:
+                hit_paragraphs += 1
+                hit_sources.update(matched)
+            chapter.paragraphs[i] = _apply_pairs(paragraph, pairs)
+    return {
+        "hit_paragraphs": hit_paragraphs,
+        "hit_sources": len(hit_sources),
+        "common_override_count": override_count,
+    }

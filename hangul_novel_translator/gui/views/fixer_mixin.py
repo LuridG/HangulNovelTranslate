@@ -328,8 +328,9 @@ class FixerMixin:
     def _fixer_refresh_glossary(self):
         valid = len(self.glossary.valid_entries())
         confirmed = sum(1 for e in self.glossary.valid_entries() if e.confirmed)
+        common_valid = len(self.common_glossary.valid_entries(allow_missing_ko=True))
         self.fixer_glossary_label.configure(
-            text=f"当前词表：{valid} 条有效 / {confirmed} 条已确认"
+            text=f"专用词表：{valid} 有效 / {confirmed} 已确认 ｜ 通用词表：{common_valid} 条"
         )
 
 
@@ -402,8 +403,8 @@ class FixerMixin:
         if not Path(epub).exists():
             messagebox.showerror("错误", "EPUB 文件不存在", parent=self)
             return
-        if not self.glossary.valid_entries():
-            messagebox.showwarning("提示", "当前词表为空，请先加载或提取词表", parent=self)
+        if not self.glossary.valid_entries() and not self.common_glossary.valid_entries(allow_missing_ko=True):
+            messagebox.showwarning("提示", "专用词表与通用词表均为空，请先加载或提取词表", parent=self)
             return
         self._fixer_set_busy(True)
         self.status_var.set("预检变更…")
@@ -415,7 +416,7 @@ class FixerMixin:
 
     def _fixer_preview_worker(self, epub):
         try:
-            result = preview_finished_epub(epub, self.glossary)
+            result = preview_finished_epub(epub, self.glossary, self.common_glossary)
             self.after(0, lambda: self._on_fixer_preview_done(result))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
@@ -435,7 +436,9 @@ class FixerMixin:
         else:
             self.fixer_preview.insert(
                 "end",
-                f"共命中 {result['total_hits']} 处，涉及 {len(result['files'])} 个正文文件：\n\n",
+                f"共命中 {result['total_hits']} 处"
+                f"（通用 {result.get('common_hits', 0)} / 专用 {result.get('dedicated_hits', 0)}），"
+                f"涉及 {len(result['files'])} 个正文文件：\n\n",
             )
             for line in lines:
                 self.fixer_preview.insert("end", line + "\n")
@@ -450,8 +453,8 @@ class FixerMixin:
         if not Path(epub).exists():
             messagebox.showerror("错误", "EPUB 文件不存在", parent=self)
             return
-        if not self.glossary.valid_entries():
-            messagebox.showwarning("提示", "当前词表为空，请先加载或提取词表", parent=self)
+        if not self.glossary.valid_entries() and not self.common_glossary.valid_entries(allow_missing_ko=True):
+            messagebox.showwarning("提示", "专用词表与通用词表均为空，请先加载或提取词表", parent=self)
             return
         mode = self.fixer_mode_var.get()
         self._fixer_set_busy(True)
@@ -473,7 +476,7 @@ class FixerMixin:
                     backup.unlink()
                 shutil.copy2(src, backup)
                 output = src
-            result = fix_finished_epub_in_place(src, self.glossary, output)
+            result = fix_finished_epub_in_place(src, self.glossary, output, self.common_glossary)
             self.after(0, lambda: self._on_fixer_run_done(result, output, mode, src))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
@@ -483,12 +486,18 @@ class FixerMixin:
     def _on_fixer_run_done(self, result, output, mode, src):
         self._fixer_set_busy(False)
         self.status_var.set("矫正完成")
+        override = int(result.get("common_override_count", 0))
+        note = f"\n通用词表已覆盖专用词表 {override} 条译名。" if override else ""
         msg = (
             f"矫正完成：修改 {result['modified_files']} 个文件，"
             f"共替换 {result['hit_count']} 处。\n"
-            f"{'已另存为：' if mode == 'new' else '已原地覆盖（已备份 .bak）：'}{output}"
+            f"{'已另存为：' if mode == 'new' else '已原地覆盖（已备份 .bak）：'}{output}{note}"
         )
         self.log(msg)
+        try:
+            self._refresh_tree()
+        except Exception:  # noqa: BLE001
+            pass
         self._fixer_offer_switch(msg, output, src)
 
 

@@ -57,7 +57,7 @@ from ..utils import extract_json, parse_paragraphs_from_payload
 
 
 from .theme import THEME, _apply_ttk_theme
-from .state import _load_ui_state, _save_ui_state
+from .state import _load_ui_state, _save_ui_state, common_glossary_path, common_glossary_template_path
 from .widgets import TreeviewTooltip, DebouncedScrollableFrame
 from .dialogs import (
     GlossaryEditDialog,
@@ -112,6 +112,20 @@ class App(ShellMixin, LeftPanelMixin, GlossaryMixin, SettingsMixin, FixerMixin, 
         _apply_ttk_theme(self)
 
         self.glossary = Glossary()
+        # 通用词表：首次启动若不存在，则用入库模板（为空则写空词表）自动生成本地文件。
+        self.common_glossary = Glossary.load(common_glossary_path())
+        if not common_glossary_path().exists():
+            try:
+                template = common_glossary_template_path()
+                if template.exists():
+                    Path(common_glossary_path()).write_text(
+                        template.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                    self.common_glossary = Glossary.load(common_glossary_path())
+                else:
+                    self.common_glossary.save(common_glossary_path())
+            except Exception:  # noqa: BLE001
+                pass
         self._extract_round = 0
         self.ui_state = ui_state
         saved_app_config = ui_state.get("app_config")

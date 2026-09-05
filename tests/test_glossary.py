@@ -444,5 +444,50 @@ class EnrichWithNicknamesTest(unittest.TestCase):
         self.assertEqual(len(llm.calls), 1)
         self.assertIn("nicknames", llm.calls[0][0]["content"])
 
+class CommonGlossaryTest(unittest.TestCase):
+    def test_valid_entries_allow_missing_ko(self):
+        g = Glossary(entries=[
+            GlossaryEntry(ko="番外", zh="外传", alternatives="番外"),
+            GlossaryEntry(ko="", zh="Omega", alternatives="오메가"),
+            GlossaryEntry(ko="", zh="只有中文没有来源"),  # 无 ko 也无 alts/history，应被排除
+            GlossaryEntry(ko="준희", zh="俊熙"),
+        ])
+        self.assertEqual(len(g.valid_entries(allow_missing_ko=True)), 3)
+        self.assertEqual(len(g.valid_entries()), 2)
+
+    def test_common_replacement_pairs_from_alternatives(self):
+        g = Glossary(entries=[
+            GlossaryEntry(ko="", zh="外传", confirmed=True, alternatives="番外,外传"),
+        ])
+        pairs = dict(g.common_replacement_pairs())
+        self.assertEqual(pairs.get("番外"), "外传")
+        # 空 ko 不应产生 ("", zh) 替换
+        self.assertNotIn("", pairs)
+
+    def test_apply_common_override_updates_dedicated(self):
+        dedicated = Glossary(entries=[
+            GlossaryEntry(ko="준희", zh="俊熙", confirmed=True, alternatives="俊希"),
+        ])
+        common = Glossary(entries=[
+            GlossaryEntry(ko="준희", zh="俊熙（通用）", confirmed=True, alternatives="俊希"),
+        ])
+        changed = dedicated.apply_common_override(common)
+        self.assertEqual(changed, 1)
+        self.assertEqual(dedicated.entries[0].zh, "俊熙（通用）")
+        self.assertIn("俊熙", dedicated.entries[0].zh_history)
+
+    def test_apply_common_override_no_match_unchanged(self):
+        dedicated = Glossary(entries=[GlossaryEntry(ko="준희", zh="俊熙")])
+        common = Glossary(entries=[GlossaryEntry(ko="범진", zh="范镇")])
+        self.assertEqual(dedicated.apply_common_override(common), 0)
+        self.assertEqual(dedicated.entries[0].zh, "俊熙")
+
+    def test_looks_common_detects_ko_less_with_source(self):
+        common = Glossary(entries=[GlossaryEntry(ko="", zh="外传", alternatives="番外")])
+        dedicated = Glossary(entries=[GlossaryEntry(ko="준희", zh="俊熙")])
+        self.assertTrue(common.looks_common())
+        self.assertFalse(dedicated.looks_common())
+
+
 if __name__ == "__main__":
     unittest.main()

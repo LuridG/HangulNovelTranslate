@@ -9,17 +9,20 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError("请先安装 customtkinter：pip install customtkinter") from exc
 
 class GlossaryEditDialog(ctk.CTkToplevel):
-    def __init__(self, master, entry: GlossaryEntry | None = None):
+    def __init__(self, master, entry: GlossaryEntry | None = None, require_ko: bool = True):
         super().__init__(master)
         self.title("编辑词条")
         self.geometry("560x490")
         self.grab_set()
         self.result: GlossaryEntry | None = None
         self.entry = entry or GlossaryEntry("", "", "term")
+        self.require_ko = require_ko
 
         self.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self, text="韩文原文").grid(row=0, column=0, padx=12, pady=(18, 6), sticky="w")
+        ctk.CTkLabel(
+            self, text="韩文原文（通用词表可留空）" if not require_ko else "韩文原文"
+        ).grid(row=0, column=0, padx=12, pady=(18, 6), sticky="w")
         self.ko_var = tk.StringVar(value=self.entry.ko)
         ctk.CTkEntry(self, textvariable=self.ko_var).grid(row=0, column=1, padx=12, pady=(18, 6), sticky="ew")
 
@@ -64,7 +67,7 @@ class GlossaryEditDialog(ctk.CTkToplevel):
         ko = self.ko_var.get().strip()
         zh = self.zh_var.get().strip()
         alternatives = self.alt_var.get().strip()
-        if not ko:
+        if self.require_ko and not ko:
             messagebox.showwarning("提示", "韩文原文不能为空", parent=self)
             return
         if not zh:
@@ -74,6 +77,11 @@ class GlossaryEditDialog(ctk.CTkToplevel):
             else:
                 messagebox.showwarning("提示", "中文译名不能为空（可先填写“可能翻译”，自动取第一个作为译名）", parent=self)
                 return
+        if not ko and not alternatives:
+            messagebox.showwarning(
+                "提示", "通用词表词条至少需要“韩文原文”或“可能翻译”其一，否则无法参与替换。", parent=self
+            )
+            return
         short = [x.strip() for x in alternatives.split(",") if x.strip() and len(x.strip()) < 3]
         if short:
             if not messagebox.askyesno(

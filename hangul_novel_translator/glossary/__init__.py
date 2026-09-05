@@ -6,6 +6,8 @@ from .models import Glossary
 from .models import GlossaryEntry
 from .models import _clean_alternatives
 from .models import _merge_alternatives
+from .models import apply_replacement_pairs
+from .models import merge_replacement_pairs
 from .extract import _strip_full_name_occurrences
 from .extract import enrich_glossary
 from .extract import enrich_glossary_with_nicknames
@@ -33,5 +35,7 @@ __all__ = [
     'extract_glossary_with_llm',
     'extract_more_glossary',
     'find_nickname_entries',
+    'apply_replacement_pairs',
+    'merge_replacement_pairs',
     'payload_to_glossary',
 ]

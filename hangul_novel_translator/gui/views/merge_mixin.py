@@ -628,8 +628,8 @@ class MergeMixin:
         if not self.merge_files:
             messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
             return
-        if not self.glossary.valid_entries():
-            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+        if not self.glossary.valid_entries() and not self.common_glossary.valid_entries(allow_missing_ko=True):
+            messagebox.showinfo("提示", "专用词表与通用词表均为空，请先加载或提取词表", parent=self)
             return
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
@@ -651,8 +651,8 @@ class MergeMixin:
         if not output_dir:
             messagebox.showwarning("提示", "请先选择输出目录", parent=self)
             return
-        if not self.glossary.valid_entries():
-            messagebox.showinfo("提示", "当前没有词表，请先“提取词表”或“加载词表”", parent=self)
+        if not self.glossary.valid_entries() and not self.common_glossary.valid_entries(allow_missing_ko=True):
+            messagebox.showinfo("提示", "专用词表与通用词表均为空，请先加载或提取词表", parent=self)
             return
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("提示", "已有任务正在运行", parent=self)
@@ -691,7 +691,7 @@ class MergeMixin:
             self.after(0, lambda: self.progress.set(0.6))
             if mode == "preview":
                 merged = merge_books(books)
-                stats = preview_fix(merged, self.glossary)
+                stats = preview_fix(merged, self.glossary, self.common_glossary)
                 self.after(0, lambda: self._on_merge_preview_done(stats))
             else:
                 auto_fixed = 0
@@ -709,6 +709,7 @@ class MergeMixin:
                     title=self.merge_title_var.get(),
                     output_txt=self.merge_txt_var.get(),
                     output_epub=self.merge_epub_var.get(),
+                    common_glossary=self.common_glossary,
                 )
                 result["auto_repaired_malformed"] = auto_fixed
                 self.after(0, lambda: self._on_merge_run_done(result))
@@ -721,14 +722,16 @@ class MergeMixin:
         self._set_busy(False)
         self.progress.set(1)
         self.status_var.set("预览完成")
+        common = int(stats.get("common_sources", 0) or 0)
+        dedicated = int(stats.get("dedicated_sources", 0) or 0)
         self.log(
             f"预览：预计命中 {stats['hit_paragraphs']} 个段落、"
-            f"{stats['hit_sources']} 种旧写法"
+            f"{stats['hit_sources']} 种旧写法（专用 {dedicated} / 通用 {common}）"
         )
         messagebox.showinfo(
             "预览",
             f"预计将修正 {stats['hit_paragraphs']} 个段落，"
-            f"涉及 {stats['hit_sources']} 种旧写法。\n点“修正并输出”执行。",
+            f"涉及 {stats['hit_sources']} 种旧写法（专用 {dedicated} / 通用 {common}）。\n点“修正并输出”执行。",
             parent=self,
         )
 
@@ -745,12 +748,15 @@ class MergeMixin:
         for path in paths:
             self.log(f"已输出：{path}")
         auto_fixed = int(result.get("auto_repaired_malformed", 0) or 0)
+        override = int(result.get("common_override_count", 0) or 0)
         extra = ""
         if auto_fixed > 0:
             extra = (
                 f"\n\n⚠ 导出时自动兜底修复了 {auto_fixed} 个畸形块"
                 f"（未先过“畸形块检测”）。建议打开“多卷修正 → 畸形块检测”复查确认。"
             )
+        if override > 0:
+            extra += f"\n\n通用词表已覆盖专用词表 {override} 条译名。"
         messagebox.showinfo(
             "完成",
             f"已合并 {result['chapters']} 章，修正命中 {result['hit_paragraphs']} 个段落。\n"
