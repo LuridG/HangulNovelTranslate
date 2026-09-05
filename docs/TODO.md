@@ -19,8 +19,8 @@
 
 - [x] `gui/app.py`（原来 2654 行的单体）按 tab 拆成 `gui/views/` 下的一组 View mixin，`App` 通过继承聚合实现；
   窗口几何 / 语言翻译主流程归入 `shell_mixin`，各 tab 的构建与事件归入对应 mixin。
-- [ ] `.venv` 桌面环境复跑 `tests/`（bundled 运行时缺 `openai/bs4/ebooklib`，仅能覆盖纯逻辑部分）；
-  并按 AGENTS 约定用 `start.bat` 人工验证 Tk/customtkinter 渲染与各 tab 交互。
+- [x] 用 `start.bat` 人工验证 Tk/customtkinter 渲染与各 tab 交互（词表 / 多卷修正 / 成品矫正 / 设置 / 视角转换均正常）
+- [ ] `.venv` 桌面环境复跑 `tests/`（bundled 运行时缺 `openai/bs4/ebooklib`，仅能覆盖纯逻辑部分）
 
 ## 第一人称改第三人称（已实现）
 
