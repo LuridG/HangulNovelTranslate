@@ -34,6 +34,8 @@ class SanitizerConfig:
     fix_quotes: bool = True
     # 标点排版美化：韩式省略号 ... -> ……、重复感叹/问号收敛为单全角。
     polish_punctuation: bool = True
+    # 折叠连叠引号与清理 JSON 数组引号残留：防“四个引号”““““/””””及 "text", 这类污染。
+    collapse_quotes: bool = True
     custom_rules: list[CustomRule] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,6 +45,7 @@ class SanitizerConfig:
             "strip_json_residue": self.strip_json_residue,
             "fix_quotes": self.fix_quotes,
             "polish_punctuation": self.polish_punctuation,
+            "collapse_quotes": self.collapse_quotes,
             "custom_rules": [r.to_dict() for r in self.custom_rules],
         }
 
@@ -57,8 +60,38 @@ class SanitizerConfig:
             strip_json_residue=bool(data.get("strip_json_residue", True)),
             fix_quotes=bool(data.get("fix_quotes", True)),
             polish_punctuation=bool(data.get("polish_punctuation", True)),
+            collapse_quotes=bool(data.get("collapse_quotes", True)),
             custom_rules=rules,
         )
+
+
+def _collapse_quote_runs(text: str) -> str:
+    """把同方向连续 ≥2 个的中文/半角引号折叠为 1 个。
+
+    模型常把引号内套引号错写成同向连叠（““““……明白了。””””），
+    中文规范里嵌套引用应交替使用 “”/‘’，同向连叠本身就是异常，折叠是安全的。
+    """
+    text = re.sub("\u201c{2,}", "\u201c", text)
+    text = re.sub("\u201d{2,}", "\u201d", text)
+    text = re.sub(r'"{2,}', '"', text)
+    return text
+
+
+def _strip_json_quote_edges(text: str) -> str:
+    """清理 JSON 数组元素残留：段首多余的半角引号、段尾的 ", / ”", 等。
+
+    例如 '"““““……明白了。””””",'（折叠后为 '"“……明白了。”",'）
+    应变成 '“……明白了。”'。
+    """
+    # 段首：半角引号后紧跟中文引号或汉字，属 JSON 封装残留，去掉。
+    m = re.match(r'^"+(\s*)([\u201c\u201d\u2018\u2019\u4e00-\u9fff])', text)
+    if m:
+        text = text[m.end() - 1 :]
+    # 段尾：“”"，/ "，/ 反引号 + 逗号（JSON 数组元素分隔残留）。
+    text = re.sub(r'[\u201d"]\s*,\s*$', "", text)
+    # 段尾：中文右引号后再跟一个半角引号（封装残留）→ 保留中文右引号。
+    text = re.sub(r'\u201d["\u201d]*$', "\u201d", text)
+    return text
 
 
 class ExportSanitizer:
@@ -115,13 +148,18 @@ class ExportSanitizer:
                 ):
                     text = text[1:-1]
 
-        # 5. 标点排版美化：韩式省略号 -> 中文省略号；重复感叹/问号收敛为单全角。
+        # 5. 折叠连叠引号 + 清理 JSON 数组元素引号残留（防“四个引号” ““““/””””、"text", 污染）。
+        if self.config.collapse_quotes:
+            text = _collapse_quote_runs(text)
+            text = _strip_json_quote_edges(text)
+
+        # 6. 标点排版美化：韩式省略号 -> 中文省略号；重复感叹/问号收敛为单全角。
         if self.config.polish_punctuation:
             text = re.sub(r"\.{3,}", "……", text)
             text = re.sub(r"[!！]{2,}", "！", text)
             text = re.sub(r"[?？]{2,}", "？", text)
 
-        # 6. Apply custom rules
+        # 7. Apply custom rules
         for rule in self.config.custom_rules:
             if not rule.enabled or not rule.pattern:
                 continue

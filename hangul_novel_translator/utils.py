@@ -92,6 +92,26 @@ def _clean_paragraphs(items: list[str]) -> list[str]:
     return out
 
 
+def coerce_raw_to_paragraphs(content: str) -> list[str]:
+    """把无法解析成 JSON 的模型原始响应转成段落列表，供人工判断、编辑。
+
+    优先按 JSON 解析（用户可能已手动改成合法 JSON/文本）；救不回就按行拆开，
+    至少让用户能看到并复制内容。不做段数强对齐，交由保存时对齐。
+    """
+    text = (content or "").strip()
+    if not text:
+        return []
+    paras: list[str] = []
+    try:
+        payload = extract_json(text)
+        paras = parse_paragraphs_from_payload(payload)
+    except Exception:  # noqa: BLE001
+        paras = []
+    if not paras:
+        paras = [x.strip() for x in text.split("\n") if x.strip()]
+    return [p for p in paras if p.strip()]
+
+
 def split_paragraph_smart(text: str, max_chars: int) -> list[str]:
     """先按行/段，再按句子标点拆分超长段落。"""
     raw_parts = re.split(r"\n+", text.strip())

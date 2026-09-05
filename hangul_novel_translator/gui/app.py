@@ -46,6 +46,7 @@ from ..translator import (
     TranslationResult,
     Translator,
     collect_sample_text_strided,
+    detect_malformed_blocks,
     format_sample_chapters,
     load_failed_chunks,
     reconcile_paragraphs,
@@ -62,6 +63,7 @@ from .dialogs import (
     GlossaryEditDialog,
     SanitizerRuleDialog,
     FailedChunkEditorDialog,
+    MalformedBlockEditorDialog,
     PerspectiveFailedEditorDialog,
 )
 
@@ -665,8 +667,9 @@ class App(ctk.CTk):
         ctk.CTkButton(run_frame, text="修正并输出", width=130, command=self._merge_run_async).grid(row=0, column=1, padx=4)
         ctk.CTkButton(run_frame, text="✏ 失败块查看", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._open_failed_editor).grid(row=0, column=2, padx=4)
         ctk.CTkButton(run_frame, text="🔄 校验并重试", width=120, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_retry_async).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(run_frame, text="🖼 图片补集", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_repair_images_async).grid(row=0, column=4, padx=4)
-        ctk.CTkButton(run_frame, text="🔍 复查", width=80, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_review_async).grid(row=0, column=5, padx=4)
+        ctk.CTkButton(run_frame, text="🧩 畸形块检测", width=118, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._open_malformed_editor).grid(row=0, column=4, padx=4)
+        ctk.CTkButton(run_frame, text="🖼 图片补集", width=110, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_repair_images_async).grid(row=0, column=5, padx=4)
+        ctk.CTkButton(run_frame, text="🔍 复查", width=80, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_review_async).grid(row=0, column=6, padx=4)
         ctk.CTkLabel(run_frame, text="单段韩文阈值").grid(row=1, column=0, padx=4, pady=(8, 0), sticky="e")
         ctk.CTkEntry(run_frame, textvariable=self.merge_review_threshold_var, width=70).grid(row=1, column=1, padx=4, pady=(8, 0), sticky="w")
 
@@ -2170,6 +2173,23 @@ class App(ctk.CTk):
         dialog = FailedChunkEditorDialog(self, files, config, self.glossary)
         self.wait_window(dialog)
 
+    def _open_malformed_editor(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        selection = self.merge_tree.selection()
+        files = [self.merge_files[int(iid)] for iid in selection] if selection else list(self.merge_files)
+        try:
+            config = self._config_from_ui()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("错误", str(exc), parent=self)
+            return
+        dialog = MalformedBlockEditorDialog(self, files, config, self.glossary)
+        self.wait_window(dialog)
+
     def _merge_repair_images_async(self):
         if not self.merge_files:
             messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
@@ -2278,6 +2298,13 @@ class App(ctk.CTk):
                 stats = preview_fix(merged, self.glossary)
                 self.after(0, lambda: self._on_merge_preview_done(stats))
             else:
+                auto_fixed = 0
+                for p in files:
+                    try:
+                        blocks = detect_malformed_blocks(p, config)
+                        auto_fixed += sum(1 for b in blocks if b.repairable)
+                    except Exception:  # noqa: BLE001
+                        pass
                 result = export_merged(
                     books,
                     self.glossary,
@@ -2287,6 +2314,7 @@ class App(ctk.CTk):
                     output_txt=self.merge_txt_var.get(),
                     output_epub=self.merge_epub_var.get(),
                 )
+                result["auto_repaired_malformed"] = auto_fixed
                 self.after(0, lambda: self._on_merge_run_done(result))
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
@@ -2318,10 +2346,18 @@ class App(ctk.CTk):
         )
         for path in paths:
             self.log(f"已输出：{path}")
+        auto_fixed = int(result.get("auto_repaired_malformed", 0) or 0)
+        extra = ""
+        if auto_fixed > 0:
+            extra = (
+                f"\n\n⚠ 导出时自动兜底修复了 {auto_fixed} 个畸形块"
+                f"（未先过“畸形块检测”）。建议打开“多卷修正 → 畸形块检测”复查确认。"
+            )
         messagebox.showinfo(
             "完成",
             f"已合并 {result['chapters']} 章，修正命中 {result['hit_paragraphs']} 个段落。\n"
-            + "\n".join(f"· {p}" for p in paths),
+            + "\n".join(f"· {p}" for p in paths)
+            + extra,
             parent=self,
         )
     # ---------------- 翻译 ----------------

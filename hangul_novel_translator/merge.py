@@ -26,7 +26,7 @@ from .book import (
 )
 from .config import AppConfig
 from .glossary import Glossary
-from .translator import _chunk_signature, build_chunks
+from .translator import _chunk_signature, build_chunks, normalize_completed_paragraphs
 
 
 _CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", re.IGNORECASE)
@@ -294,8 +294,14 @@ def book_from_state(state_path: Path, config: AppConfig) -> Book:
         for chunk in sorted(by_chapter.get(chapter.index, []), key=lambda c: c.chunk_index):
             paras = completed.get(chunk.id)
             if isinstance(paras, list):
-                paragraphs.extend(str(p) for p in paras)
-                styles.extend(chunk.styles[: len(paras)])
+                cleaned, _status = normalize_completed_paragraphs(
+                    paras,
+                    expected_count=len(chunk.paragraphs),
+                    source_paragraphs=list(chunk.paragraphs),
+                    fill_from_source=True,
+                )
+                paragraphs.extend(cleaned)
+                styles.extend(chunk.styles[: len(cleaned)])
             else:
                 paragraphs.extend(chunk.paragraphs)
                 styles.extend(chunk.styles[: len(chunk.paragraphs)])

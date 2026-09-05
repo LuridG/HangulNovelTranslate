@@ -1,7 +1,7 @@
 # hangul_novel_translator/translator.py
 from __future__ import annotations
 
-from hangul_novel_translator.sanitizer import ExportSanitizer
+from hangul_novel_translator.sanitizer import ExportSanitizer, SanitizerConfig
 
 import hashlib
 import json
@@ -186,7 +186,7 @@ def save_manual_translation(
     failed = data.setdefault("failed", {})
     if chunk_id in failed:
         failed.pop(chunk_id, None)
-    completed[chunk_id] = [str(x) for x in translated_paragraphs]
+    completed[chunk_id] = sanitize_committed_paragraphs(translated_paragraphs)
     state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"completed": len(completed), "failed": len(failed)}
 
@@ -269,6 +269,354 @@ def reconcile_paragraphs(translated: list[str], expected_count: int) -> list[str
     # 数量不足：补空段落。宁可保留原文格式，也不伪造内容。
     translated.extend([""] * (expected_count - len(translated)))
     return translated
+
+
+# ---------------- 畸形块检测 / 归一化 / 修复 ----------------
+# 翻译时偶发把模型原始 JSON 响应当成整段写入 completed，导致导出出现
+# “四个引号”““““/””””、JSON 数组残留 "text",、整段塌缩进首段等情况。
+# 下面是一套“尽量自动救回、救不回则回退原文”的兜底逻辑，供：
+#   - 导出侧（book_from_state / _assemble）渲染时归一化；
+#   - 多卷修正页的“畸形块检测”做机器批量修复。
+
+_QUOTE_SANITIZER = ExportSanitizer(
+    SanitizerConfig(
+        enabled=True,
+        # 只做“引号连叠折叠 + JSON 残留清理”，不剥编号、不美化标点，
+        # 以免在导出侧覆盖用户“自定义清洗规则”里关掉的相关开关。
+        strip_numbers=False,
+        strip_json_residue=True,
+        fix_quotes=True,
+        polish_punctuation=False,
+        collapse_quotes=True,
+    )
+)
+
+_STRUCT_JSON_KEYS = {"paragraphs", "translation", "text", "content"}
+_JSON_STR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+@dataclass
+class MalformedBlock:
+    """一处畸形块的可视化信息：所属存档 + 当前损坏值 + 机器修复建议。"""
+
+    archive: Path
+    chunk_id: str
+    chapter_index: int
+    chapter_title: str
+    issue: str
+    source_paragraphs: list[str] = field(default_factory=list)
+    current_values: list[str] = field(default_factory=list)
+    repaired: list[str] = field(default_factory=list)
+    repairable: bool = False
+
+
+def _repair_clean_paragraph(text: str) -> str:
+    return _QUOTE_SANITIZER.clean_paragraph(str(text))
+
+
+def sanitize_committed_paragraphs(paras: list[str]) -> list[str]:
+    """写回 completed 前的轻量清洗：折叠连叠引号、剥 JSON 残留、能救回的 blob 直接救回。
+
+    不主动回退到原文（写入端不注入韩文）；救不回的原样保留，留给“畸形块检测”识别。
+    """
+    if not isinstance(paras, list):
+        return list(paras)
+    raw = [str(p) for p in paras]
+    nonempty = [p for p in raw if p.strip()]
+    if len(nonempty) == 1:
+        recovered = _recover_from_blob(raw)
+        if recovered:
+            return recovered
+    return [_repair_clean_paragraph(p) for p in raw]
+
+
+def _extract_json_strings(text: str) -> list[str]:
+    """从一段文本里尽力抽出 JSON 字符串数组元素（容忍 JSON 语法破损）。"""
+    out: list[str] = []
+    for token in _JSON_STR_RE.findall(text):
+        token = token.strip()
+        if not token:
+            continue
+        if token in _STRUCT_JSON_KEYS or re.fullmatch(r"[pP]\d+", token):
+            continue
+        if len(token) < 2:
+            continue
+        out.append(token)
+    return out
+
+
+def _looks_like_json_fragment(raw: list[str]) -> bool:
+    """整条 completed 值是“原样 JSON 按行拆开”的碎片（首行 {"paragraphs": [，后续 "text",）。"""
+    if not raw:
+        return False
+    if raw[0].strip().startswith('{"paragraphs"'):
+        # 首元素是结构头；只有当后面还有非空碎片时才视为“逐行拆开”，
+        # 否则（首元素是大块 JSON、其余为空串）属于“整段塌缩”。
+        return any(x.strip() for x in raw[1:])
+    frag_tail = [x for x in raw[1:] if x.strip().endswith('",')]
+    return len(frag_tail) >= 2
+
+
+def _recover_from_fragments(raw: list[str]) -> list[str] | None:
+    """把“原样 JSON 按行拆开”的列表还原成干净段落。"""
+    paras: list[str] = []
+    for line in raw:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('{"paragraphs"') or line.startswith("{"):
+            continue
+        if line == "]" or line == "]}" or line == "}":
+            continue
+        # 去掉数组元素封装：段首 "、段尾 " 或 ",。
+        line = re.sub(r'^\s*"+', "", line)
+        line = re.sub(r'"\s*,?\s*$', "", line)
+        if line.endswith("]"):
+            line = line[:-1].rstrip()
+        line = _repair_clean_paragraph(line)
+        if line:
+            paras.append(line)
+    return paras or None
+
+
+def _recover_from_blob(raw: list[str]) -> list[str] | None:
+    """把“整段塌缩进首元素的 JSON”拆回段落。"""
+    text = raw[0] if raw else ""
+    paras: list[str] = []
+    try:
+        payload = extract_json(text)
+        paras = parse_paragraphs_from_payload(payload)
+    except Exception:  # noqa: BLE001
+        paras = []
+    if len(paras) < 2:
+        # 语法破损时优先按 JSON 数组分隔符切分（对内嵌 ASCII 引号更稳）。
+        paras = _split_json_array_text(text)
+    if len(paras) < 2:
+        # 最后退化为正则抽字符串。
+        paras = _extract_json_strings(text)
+    cleaned = [_repair_clean_paragraph(p) for p in paras]
+    cleaned = [p for p in cleaned if p]
+    return cleaned if len(cleaned) >= 2 else None
+
+
+def _split_json_array_text(text: str) -> list[str]:
+    """按 JSON 数组元素分隔符 `", "` 切分，容忍内部 ASCII 引号导致的 JSON 破损。"""
+    body = text
+    m = re.search(r'"\s*:\s*\[\s*', body)
+    if m:
+        body = body[m.end() :]
+    # 剥掉模型回显的尾部格式说明（如 `format: {"paragraphs": [...]}`）。
+    body = re.sub(r"\s*format\s*:\s*\{.*\}\s*$", "", body, flags=re.DOTALL)
+    # 剥掉可能的数组/对象收尾括号。
+    body = re.sub(r'\s*\]\s*\}\s*$', "", body)
+    body = body.rstrip("]}")
+    parts = re.split(r'",\s*"', body)
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith('"'):
+            part = part[1:]
+        if part.endswith('"'):
+            part = part[:-1]
+        # 残留的列表/对象括号与格式说明。
+        part = re.sub(r'[\s}]+$', "", part)
+        part = re.sub(r'\s*]\s*(?:format\s*:\s*\{.*\})?\s*$', "", part)
+        out.append(part)
+    return out
+
+
+def _has_quote_run(text: str) -> bool:
+    return bool(re.search(r"[\u201c]{2,}|[\u201d]{2,}", text))
+
+
+def _has_json_residue(text: str) -> bool:
+    return text.startswith('"') or bool(re.search(r'[\u201d"]\s*,\s*$', text))
+
+
+def _align_cleaned(
+    items: list[str],
+    expected_count: int | None,
+    source: list[str] | None,
+    fill_from_source: bool,
+) -> list[str]:
+    """按原文段数对齐：空位回退源码或留空，避免导出空段/乱码。"""
+    if expected_count is None:
+        return [p for p in items if p]
+    out: list[str] = []
+    for i in range(expected_count):
+        if i < len(items) and items[i].strip():
+            out.append(items[i].strip())
+        elif fill_from_source and source and i < len(source) and str(source[i]).strip():
+            out.append(str(source[i]).strip())
+        else:
+            out.append("")
+    return out
+
+
+def normalize_completed_paragraphs(
+    values: Any,
+    expected_count: int | None = None,
+    source_paragraphs: list[str] | None = None,
+    *,
+    fill_from_source: bool = False,
+) -> tuple[list[str], str]:
+    """归一化 completed[chunk_id]，返回 (段落, 状态)。
+
+    状态：ok（本来就干净）、recovered（从 JSON 拆回）、cleaned（去残留/折叠引号）、
+          fallback_source（无法修复，回退原文）、unresolved（无可救）。
+    """
+    if not isinstance(values, list):
+        if fill_from_source and source_paragraphs:
+            return list(source_paragraphs), "fallback_source"
+        return [], "unresolved"
+
+    raw = [str(v) for v in values]
+
+    # 情形 A：整条是“原样 JSON 按行拆开”的碎片。
+    if _looks_like_json_fragment(raw):
+        recovered = _recover_from_fragments(raw)
+        if recovered:
+            paras = _align_cleaned(recovered, expected_count, source_paragraphs, fill_from_source)
+            return paras, "recovered"
+        paras = _align_cleaned(raw, expected_count, source_paragraphs, fill_from_source)
+        return paras, "fallback_source" if fill_from_source else "unresolved"
+
+    # 情形 B：整段塌缩进首元素（首元素含 JSON 对象，其余多为空）。
+    nonempty = [p for p in raw if p.strip()]
+    if len(nonempty) == 1:
+        recovered = _recover_from_blob(raw)
+        if recovered:
+            paras = _align_cleaned(recovered, expected_count, source_paragraphs, fill_from_source)
+            return paras, "recovered"
+
+    # 情形 C：常规列表，逐段清洗。
+    cleaned = [_repair_clean_paragraph(p) for p in raw]
+    residual = any(_has_quote_run(p) or _has_json_residue(p) for p in cleaned if p)
+    paras = _align_cleaned(cleaned, expected_count, source_paragraphs, fill_from_source)
+    if not any(p.strip() for p in paras):
+        if fill_from_source and source_paragraphs:
+            return list(source_paragraphs), "fallback_source"
+        return paras, "unresolved"
+    return paras, ("cleaned" if residual else "ok")
+
+
+def _classify_malformed(
+    chunk_id: str,
+    values: Any,
+    source_paragraphs: list[str],
+    parsed: list[str],
+    status: str,
+    expected_count: int | None,
+) -> MalformedBlock:
+    """根据归一化结果生成畸形块对象与原因描述。"""
+    raw = [str(v) for v in values] if isinstance(values, list) else []
+    issue = "其他"
+    if _looks_like_json_fragment(raw):
+        issue = "JSON 逐行残留"
+    elif len([p for p in raw if p.strip()]) == 1:
+        issue = "JSON 整段塌缩"
+    elif any(_has_quote_run(p) for p in parsed if p):
+        issue = "连叠引号"
+    elif any(not p.strip() for p in parsed):
+        issue = "含空段/缺译文"
+    elif status == "fallback_source":
+        issue = "无法自动修复"
+
+    filled = [p for p in parsed if p.strip()]
+    # 救回 ≥2 段即视为机器可修复（缺段位置写回时用原文补齐，避免空段）；
+    # 完全救不回（如只有 {"paragraphs": 前缀）才留给手动/回翻。
+    meaningful = len(filled) >= 2
+    repairable = meaningful and status in ("recovered", "cleaned")
+    repaired: list[str] = []
+    if repairable and expected_count:
+        repaired, _rep_status = normalize_completed_paragraphs(
+            values, expected_count, source_paragraphs, fill_from_source=True
+        )
+    return MalformedBlock(
+        archive=Path(""),
+        chunk_id=chunk_id,
+        chapter_index=0,
+        chapter_title="",
+        issue=issue,
+        source_paragraphs=list(source_paragraphs),
+        current_values=raw,
+        repaired=repaired,
+        repairable=repairable,
+    )
+
+
+def detect_malformed_blocks(state_path: str | Path, config: AppConfig) -> list[MalformedBlock]:
+    """扫描翻译存档的 completed，挑出畸形块并附上机器修复建议。
+
+    repairable=True：可用机器直接修复（不耗 token）；
+    repairable=False：需用户手动补翻或回传 LLM 重翻（如译文彻底丢失）。
+    """
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    completed = data.get("completed") or {}
+    if not isinstance(completed, dict):
+        completed = {}
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    cfg = _retry_chunk_config(data, config)
+
+    book = load_book(source)
+    chunks = {c.id: c for c in build_chunks(book, cfg)}
+    blocks: list[MalformedBlock] = []
+    for chunk_id, values in completed.items():
+        if not isinstance(values, list):
+            continue
+        chunk = chunks.get(str(chunk_id))
+        source_paras = list(chunk.paragraphs) if chunk is not None else []
+        expected = len(source_paras) if chunk is not None else None
+        parsed, status = normalize_completed_paragraphs(
+            values, expected, source_paras, fill_from_source=False
+        )
+        if status in ("recovered", "cleaned", "fallback_source", "unresolved"):
+            block = _classify_malformed(
+                str(chunk_id), values, source_paras, parsed, status, expected
+            )
+            if chunk is not None:
+                block.archive = state_path
+                block.chapter_index = chunk.chapter_index
+                block.chapter_title = chunk.chapter_title
+            blocks.append(block)
+    return blocks
+
+
+def repair_malformed_blocks(blocks: list[MalformedBlock]) -> dict[str, int]:
+    """把机器可修复的畸形块写回 completed，返回 {fixed, skipped, unresolved}。"""
+    fixed = 0
+    skipped = 0
+    unresolved = 0
+    # 按存档分组，避免同一文件反复读写。
+    by_archive: dict[Path, list[MalformedBlock]] = {}
+    for block in blocks:
+        if not block.repairable or not block.repaired:
+            unresolved += 1
+            continue
+        if not block.archive:
+            skipped += 1
+            continue
+        by_archive.setdefault(block.archive, []).append(block)
+
+    for archive, items in by_archive.items():
+        data = json.loads(archive.read_text(encoding="utf-8"))
+        completed = data.setdefault("completed", {})
+        changed = False
+        for block in items:
+            paras = list(block.repaired)
+            if not any(p.strip() for p in paras):
+                continue
+            completed[str(block.chunk_id)] = paras
+            changed = True
+            fixed += 1
+        if changed:
+            archive.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"fixed": fixed, "skipped": skipped, "unresolved": unresolved}
 
 
 TRANSLATION_SYSTEM_TEMPLATE = """你是一名资深的韩语小说中文译者。请把用户提供的韩语小说内容翻译成{target_lang}。
@@ -614,7 +962,7 @@ class Translator:
                     last_error = str(exc)
                     continue
                 completed = data.setdefault("completed", {})
-                completed[chunk_id] = translated
+                completed[chunk_id] = sanitize_committed_paragraphs(translated)
                 failed.pop(chunk_id, None)
                 self._save_state(state_path, data)
                 ok = True
@@ -666,7 +1014,7 @@ class Translator:
         try:
             translated = self._translate_chunk(chunk, glossary)
             with self._state_lock:
-                completed[chunk.id] = translated
+                completed[chunk.id] = sanitize_committed_paragraphs(translated)
                 failed.pop(chunk.id, None)
             self._save_state(state_path, state)
         except Exception as exc:  # noqa: BLE001
@@ -736,8 +1084,18 @@ class Translator:
             for chunk in sorted(by_chapter.get(chapter.index, []), key=lambda c: c.chunk_index):
                 if chunk.id in completed:
                     paras = completed[chunk.id]
-                    paragraphs.extend(paras)
-                    styles.extend(chunk.styles[: len(paras)])
+                    if isinstance(paras, list):
+                        cleaned, _status = normalize_completed_paragraphs(
+                            paras,
+                            expected_count=len(chunk.paragraphs),
+                            source_paragraphs=list(chunk.paragraphs),
+                            fill_from_source=True,
+                        )
+                        paragraphs.extend(cleaned)
+                        styles.extend(chunk.styles[: len(cleaned)])
+                    else:
+                        paragraphs.extend(chunk.paragraphs)
+                        styles.extend(chunk.styles[: len(chunk.paragraphs)])
                 else:
                     # 失败/未完成块保留原文，便于人工识别。
                     paragraphs.extend(chunk.paragraphs)
