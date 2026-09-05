@@ -28,7 +28,7 @@ from ...utils import (extract_json, parse_paragraphs_from_payload)
 from ..theme import (THEME, _apply_ttk_theme)
 from ..state import (_load_ui_state, _save_ui_state)
 from ..widgets import (TreeviewTooltip, DebouncedScrollableFrame)
-from ..dialogs import (GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
+from ..dialogs import (GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog, TitleTranslationDialog)
 
 
 try:
@@ -128,6 +128,16 @@ class MergeMixin:
         ctk.CTkButton(run_frame, text="🔍 复查", width=80, fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"], border_width=1, border_color=THEME["card_border"], command=self._merge_review_async).grid(row=0, column=6, padx=4)
         ctk.CTkLabel(run_frame, text="单段韩文阈值").grid(row=1, column=0, padx=4, pady=(8, 0), sticky="e")
         ctk.CTkEntry(run_frame, textvariable=self.merge_review_threshold_var, width=70).grid(row=1, column=1, padx=4, pady=(8, 0), sticky="w")
+        ctk.CTkButton(
+            run_frame,
+            text="🔖 标题翻译",
+            width=120,
+            fg_color=THEME["secondary"],
+            hover_color=THEME["secondary_hover"],
+            border_width=1,
+            border_color=THEME["card_border"],
+            command=self._open_title_editor,
+        ).grid(row=1, column=2, padx=4, pady=(8, 0), sticky="w")
 
         audit_frame = ctk.CTkFrame(parent, fg_color="transparent")
         audit_frame.grid(row=5, column=0, padx=12, pady=(0, 8), sticky="ew")
@@ -165,7 +175,7 @@ class MergeMixin:
 
         ctk.CTkLabel(
             parent,
-            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；“复查”统计韩文字符数；“自检修复块”按自定义正则识别混入译文的失败字段。",
+            text="提示：每个存档需与其对应的原书（.txt/.epub）保持在原路径；“复查”统计韩文字符数；“自检修复块”按自定义正则识别混入译文的失败字段；“标题翻译”检查章节标题是否已翻译，可批量或手动补翻。",
             wraplength=620,
             justify="left",
             anchor="w",
@@ -578,6 +588,24 @@ class MergeMixin:
             messagebox.showerror("错误", str(exc), parent=self)
             return
         dialog = MalformedBlockEditorDialog(self, files, config, self.glossary)
+        self.wait_window(dialog)
+
+
+    def _open_title_editor(self):
+        if not self.merge_files:
+            messagebox.showinfo("提示", "请先添加翻译存档", parent=self)
+            return
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("提示", "已有任务正在运行", parent=self)
+            return
+        selection = self.merge_tree.selection()
+        files = [self.merge_files[int(iid)] for iid in selection] if selection else list(self.merge_files)
+        try:
+            config = self._config_from_ui()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("错误", str(exc), parent=self)
+            return
+        dialog = TitleTranslationDialog(self, files, config, self.glossary)
         self.wait_window(dialog)
 
 

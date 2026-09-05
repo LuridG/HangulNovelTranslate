@@ -5,12 +5,19 @@ from __future__ import annotations
 from .state import _chunk_config
 from .state import archive_filename_title
 from .state import audit_translation_state
+from .state import audit_title_translation
+from .state import apply_group_translation
 from .state import book_from_state
 from .state import detect_merge_title
+from .state import detect_title_translations
+from .state import group_title_items
 from .state import hangul_char_count
 from .state import inspect_state
 from .state import repair_image_state
 from .state import review_translation_state
+from .state import save_title_translation
+from .state import save_title_translations
+from .state import TitleTranslationItem
 from .resources import _as_bytes
 from .resources import _css_dependencies_match
 from .resources import _is_path_escape
@@ -33,14 +40,21 @@ from ._consts import _VOLUME_MARK_RE
 __all__ = [
     'archive_filename_title',
     'audit_translation_state',
+    'audit_title_translation',
+    'apply_group_translation',
     'book_from_state',
     'detect_merge_title',
+    'detect_title_translations',
     'export_merged',
     'fix_book',
+    'group_title_items',
     'hangul_char_count',
     'inspect_state',
     'merge_books',
     'preview_fix',
     'repair_image_state',
     'review_translation_state',
+    'save_title_translation',
+    'save_title_translations',
+    'TitleTranslationItem',
 ]

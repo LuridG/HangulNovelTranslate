@@ -10,17 +10,24 @@ from hangul_novel_translator.book import Book, Chapter, load_book
 from hangul_novel_translator.config import AppConfig
 from hangul_novel_translator.glossary import Glossary, GlossaryEntry
 from hangul_novel_translator.merge import (
+    apply_group_translation,
     archive_filename_title,
+    audit_title_translation,
     book_from_state,
     detect_merge_title,
+    detect_title_translations,
     export_merged,
     fix_book,
+    group_title_items,
     inspect_state,
     merge_books,
     preview_fix,
     hangul_char_count,
     audit_translation_state,
     review_translation_state,
+    save_title_translation,
+    save_title_translations,
+    TitleTranslationItem,
 )
 from hangul_novel_translator.translator import build_chunks
 
@@ -547,6 +554,177 @@ class MergeCommonGlossaryTest(unittest.TestCase):
         self.assertEqual(book.chapters[0].paragraphs[0], "俊熙（通用） 范镇 外传")
         by_ko = {e.ko: e for e in dedicated.entries}
         self.assertEqual(by_ko["준희"].zh, "俊熙（通用）")
+
+
+class AuditTitleTranslationTest(unittest.TestCase):
+    def test_counts_missing_and_complete_titles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "title_audit.txt"
+            source.write_text(
+                "제1장 시작\n본문입니다.\n제2장 시작\n두 번째 본문입니다.\n",
+                encoding="utf-8",
+            )
+            book = load_book(source)
+            first, second = book.chapters
+            state = {
+                "source": str(source),
+                "completed": {},
+                "failed": {},
+                "chapter_titles": {
+                    str(first.index): {"ko": first.title, "zh": "第一章 开始"},
+                    str(second.index): {"ko": second.title, "zh": ""},
+                },
+            }
+            state_path = tmp / "title_audit.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = audit_title_translation(state_path)
+        self.assertEqual(result["chapters"], 2)
+        self.assertEqual(result["translated"], 1)
+        self.assertEqual(result["missing"], 1)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["items"][0]["ko"], second.title)
+
+    def test_reports_missing_when_chapter_titles_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "title_audit2.txt"
+            source.write_text("제1장 시작\n본문입니다.\n", encoding="utf-8")
+            state = {"source": str(source), "completed": {}, "failed": {}}
+            state_path = tmp / "title_audit2.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = audit_title_translation(state_path)
+        self.assertEqual(result["chapters"], 1)
+        self.assertEqual(result["translated"], 0)
+        self.assertEqual(result["missing"], 1)
+        self.assertFalse(result["complete"])
+
+    def test_skips_decorative_titles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "title_audit3.txt"
+            # 装饰性组合字符（zalgo）标题按翻译流程规则跳过，不计入缺失。
+            source.write_text("제1장\u0337 시작\n본문입니다.\n", encoding="utf-8")
+            state = {
+                "source": str(source),
+                "completed": {},
+                "failed": {},
+            }
+            state_path = tmp / "title_audit3.translation_state.json"
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = audit_title_translation(state_path)
+        # 唯一的章节标题是装饰性乱码，不需要翻译，因此不计入缺失。
+        self.assertEqual(result["chapters"], 0)
+        self.assertEqual(result["missing"], 0)
+        self.assertTrue(result["complete"])
+
+
+class TitleTranslationSaveTest(unittest.TestCase):
+    def _mk_state(self, tmp):
+        source = tmp / "title_save.txt"
+        source.write_text("제1장 시작\n본문입니다.\n제2장 시작\n두번째 본문입니다.\n", encoding="utf-8")
+        book = load_book(source)
+        state = {"source": str(source), "completed": {}, "failed": {}}
+        state_path = tmp / "title_save.translation_state.json"
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        return source, book, state_path
+
+    def test_detect_title_translations_returns_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _source, book, state_path = self._mk_state(tmp)
+            missing = detect_title_translations(state_path)
+            self.assertEqual([item.chapter_index for item in missing], [ch.index for ch in book.chapters])
+            self.assertTrue(all(item.archive == state_path for item in missing))
+            self.assertTrue(all(item.zh == "" for item in missing))
+
+    def test_save_title_translation_writes_zh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _source, book, state_path = self._mk_state(tmp)
+            first = book.chapters[0]
+            save_title_translation(state_path, first.index, first.title, "第一章 开始")
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        entry = data["chapter_titles"][str(first.index)]
+        self.assertEqual(entry["ko"], first.title)
+        self.assertEqual(entry["zh"], "第一章 开始")
+
+    def test_save_title_translations_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _source, book, state_path = self._mk_state(tmp)
+            items = [
+                TitleTranslationItem(state_path, book.chapters[0].index, book.chapters[0].title, "第一章 开始"),
+                TitleTranslationItem(state_path, book.chapters[1].index, book.chapters[1].title, "第二章 开始"),
+            ]
+            result = save_title_translations(items)
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["written"], 2)
+        self.assertEqual(data["chapter_titles"][str(book.chapters[0].index)]["zh"], "第一章 开始")
+        self.assertEqual(data["chapter_titles"][str(book.chapters[1].index)]["zh"], "第二章 开始")
+
+
+class TitleTranslationGroupTest(unittest.TestCase):
+    def _item(self, ko, idx=0):
+        return TitleTranslationItem(Path("fake.translation_state.json"), idx, ko)
+
+    def test_group_title_items_groups_by_stable_core(self):
+        items = [
+            self._item("Chapter 1 - 해피 엔딩. (1)", 0),
+            self._item("Chapter 2 - 해피 엔딩. (2)", 1),
+            self._item("Chapter 3 - 임마기 되아버 (3)", 2),
+        ]
+        groups = group_title_items(items)
+        self.assertEqual(len(groups), 2)
+        happy = next(g for g in groups if g["core"] == "해피 엔딩.")
+        devil = next(g for g in groups if g["core"] == "임마기 되아버")
+        self.assertEqual(len(happy["members"]), 2)
+        self.assertEqual(len(devil["members"]), 1)
+
+    def test_group_title_items_keeps_distinct_titles_separate(self):
+        items = [
+            self._item("프롤로그", 0),
+            self._item("에필로그", 1),
+            self._item("중간 이야기", 2),
+        ]
+        groups = group_title_items(items)
+        self.assertEqual(len(groups), 3)
+        self.assertTrue(all(len(g["members"]) == 1 for g in groups))
+
+    def test_apply_group_translation_backfills_numbers(self):
+        members = [
+            self._item("Chapter 1 - 해피 엔딩. (1)", 0),
+            self._item("Chapter 2 - 해피 엔딩. (2)", 1),
+        ]
+        group = group_title_items(members)[0]
+        result = apply_group_translation(group, "第1章 - 幸福结局。(1)")
+        by_ko = {item.ko: zh for item, zh in result}
+        self.assertEqual(by_ko["Chapter 1 - 해피 엔딩. (1)"], "第1章 - 幸福结局。(1)")
+        self.assertEqual(by_ko["Chapter 2 - 해피 엔딩. (2)"], "第2章 - 幸福结局。(2)")
+
+    def test_apply_group_translation_handles_missing_trailing_number(self):
+        members = [
+            self._item("Chapter 14 - 임마기 되아버 (14)", 13),
+            self._item("Chapter 15 - 임마기 되아버", 14),
+            self._item("Chapter 16 - 임마기 되아버 (16)", 15),
+        ]
+        group = group_title_items(members)[0]
+        result = apply_group_translation(group, "第14章 - 大魔王。(14)")
+        by_ko = {item.ko: zh for item, zh in result}
+        self.assertEqual(by_ko["Chapter 14 - 임마기 되아버 (14)"], "第14章 - 大魔王。(14)")
+        self.assertEqual(by_ko["Chapter 15 - 임마기 되아버"], "第15章 - 大魔王。")
+        self.assertEqual(by_ko["Chapter 16 - 임마기 되아버 (16)"], "第16章 - 大魔王。(16)")
+
+    def test_group_title_items_groups_episode_markers(self):
+        items = [
+            self._item("제1화 이야기", 0),
+            self._item("제2화 이야기", 1),
+            self._item("제3화 다른 이야기", 2),
+        ]
+        groups = group_title_items(items)
+        self.assertEqual(len(groups), 2)
+        story = next(g for g in groups if g["core"] == "이야기")
+        self.assertEqual(len(story["members"]), 2)
 
 
 if __name__ == "__main__":

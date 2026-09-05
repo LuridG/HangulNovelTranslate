@@ -3,15 +3,26 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from ..book import (Book, Chapter, ParagraphStyle, _href_basename, book_to_txt, export_epub, load_book, metadata_from_dict, metadata_to_dict, parse_epub)
+from ..book import (Book, Chapter, ParagraphStyle, _href_basename, book_to_txt, export_epub, is_decorative_title, load_book, metadata_from_dict, metadata_to_dict, parse_epub)
 from ..config import AppConfig
 from ..translator import (_chunk_signature, build_chunks, normalize_completed_paragraphs)
 from ._consts import _HANGUL_RUN_RE
 from ._consts import _STATE_FILE_SUFFIX
 from ._consts import _VOLUME_MARK_RE
+
+
+@dataclass
+class TitleTranslationItem:
+    """一处缺失标题译文的可视化信息：所属存档 + 章节下标 + 原标题 + 当前译文。"""
+
+    archive: Path
+    chapter_index: int
+    ko: str
+    zh: str = ""
+
 
 
 def hangul_char_count(text: str) -> int:
@@ -162,6 +173,255 @@ def inspect_state(path: Path) -> dict[str, Any]:
         "completed": len(completed),
         "failed": len(data.get("failed") or {}),
     }
+
+
+
+def audit_title_translation(state_path: Path) -> dict[str, Any]:
+    """只读检测章节标题是否都已翻译（zh 非空），用于新增“标题翻译检测”按钮。
+
+    以存档 source 重新解析原书为准，逐章判断标题是否已有中文译文；装饰性乱码标题
+    按翻译流程规则跳过，不计入缺失。若章节标题已有 zh 但与当前原书标题不匹配
+    （ko 对不上），同样视为未生效并计入缺失。
+    """
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    saved_titles = data.get("chapter_titles") or {}
+    if not isinstance(saved_titles, dict):
+        saved_titles = {}
+    book = load_book(source)
+    items: list[dict[str, Any]] = []
+    translated = 0
+    for chapter in book.chapters:
+        if not chapter.title or is_decorative_title(chapter.title):
+            continue
+        saved = saved_titles.get(str(chapter.index))
+        saved = saved if isinstance(saved, dict) else {}
+        zh = str(saved.get("zh", "") or "").strip()
+        ko_matches = str(saved.get("ko", "") or "") == chapter.title
+        if zh and ko_matches:
+            translated += 1
+        else:
+            items.append({"index": chapter.index, "ko": chapter.title, "zh": zh})
+    total = translated + len(items)
+    return {
+        "chapters": total,
+        "translated": translated,
+        "missing": len(items),
+        "items": items,
+        "complete": not items,
+    }
+
+
+
+def detect_title_translations(state_path: Path) -> list[TitleTranslationItem]:
+    """返回存档里缺失标题译文（zh 为空或未生效）的章节，供“标题翻译”弹窗使用。"""
+    state_path = Path(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    source = Path(str(data.get("source", "")))
+    if not source.exists():
+        raise ValueError(f"存档对应的原书不存在：{source}")
+    saved_titles = data.get("chapter_titles") or {}
+    if not isinstance(saved_titles, dict):
+        saved_titles = {}
+    book = load_book(source)
+    items: list[TitleTranslationItem] = []
+    for chapter in book.chapters:
+        if not chapter.title or is_decorative_title(chapter.title):
+            continue
+        saved = saved_titles.get(str(chapter.index))
+        saved = saved if isinstance(saved, dict) else {}
+        zh = str(saved.get("zh", "") or "").strip()
+        ko_matches = str(saved.get("ko", "") or "") == chapter.title
+        if not (zh and ko_matches):
+            items.append(
+                TitleTranslationItem(
+                    archive=state_path,
+                    chapter_index=chapter.index,
+                    ko=chapter.title,
+                    zh=zh,
+                )
+            )
+    return items
+
+
+
+def save_title_translation(
+    state_path: Path,
+    chapter_index: int,
+    ko: str,
+    zh: str,
+) -> dict[str, int]:
+    """把手动填写的标题译文写回存档 chapter_titles，返回 {"chapter": 章节下标}。"""
+    state_path = Path(state_path)
+    zh = str(zh or "").strip()
+    if not zh:
+        raise ValueError("标题译文不能为空")
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    titles = data.setdefault("chapter_titles", {})
+    if not isinstance(titles, dict):
+        titles = {}
+        data["chapter_titles"] = titles
+    titles[str(int(chapter_index))] = {"ko": str(ko), "zh": zh}
+    state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"chapter": int(chapter_index)}
+
+
+
+def save_title_translations(items: list[TitleTranslationItem]) -> dict[str, int]:
+    """把一批标题译文写回各自存档；按存档合并成一次落盘，避免逐条重写大 JSON。"""
+    by_archive: dict[Path, dict[str, dict[str, str]]] = {}
+    written = 0
+    for item in items:
+        zh = str(item.zh or "").strip()
+        if not zh:
+            continue
+        key = str(int(item.chapter_index))
+        by_archive.setdefault(Path(item.archive), {})[key] = {"ko": str(item.ko), "zh": zh}
+    for state_path, entries in by_archive.items():
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        titles = data.setdefault("chapter_titles", {})
+        if not isinstance(titles, dict):
+            titles = {}
+            data["chapter_titles"] = titles
+        titles.update(entries)
+        state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        written += len(entries)
+    return {"written": written}
+
+
+
+@dataclass
+class _TitleNumberParts:
+    """拆分带编号章节标题得到的结构：前导编号段、核心正文、结尾编号段。"""
+
+    lead: str
+    lead_raw: str
+    core: str
+    trail_raw: str
+    trail: str
+
+
+
+# 章节标题常见的前导编号：Chapter 1 - / 제1장 - / 第 1 章 - / (1) . / 1. 等。
+_TITLE_LEAD_PATTERNS = [
+    re.compile(r"^\s*(?:[Cc]hapter|CH\.?|Ch\.?)\s*(\d+)\s*[-–—:：.、]?\s*"),
+    re.compile(r"^\s*제\s*(\d+)\s*[장话话話화話회回章節节]?\s*[-–—:：.、]?\s*"),
+    re.compile(r"^\s*第\s*(\d+)\s*[章回话節节話회回]?\s*[-–—:：.、]?\s*"),
+    re.compile(r"^\s*[（(]\s*(\d+)\s*[）)]\s*[-–—:：.、]?\s*"),
+    re.compile(r"^\s*(\d+)\s*[-–—:：.、]\s*"),
+]
+
+
+
+# 章节标题常见的结尾编号：(1) / (1) / -1 / 1。
+_TITLE_TRAIL_PATTERNS = [
+    re.compile(r"\s*[（(]\s*(\d+)\s*[）)]\s*$"),
+    re.compile(r"\s*[-–—]?\s*(\d+)\s*$"),
+]
+
+
+
+def _split_numbered_title(title: str) -> _TitleNumberParts:
+    """把章节标题拆成前导编号段、核心正文、结尾编号段。
+
+    仅用于识别“只差末尾/开头数字”的相似标题；若拆不出有意义的核心，
+    则把整段原标题当作核心返回，避免错误合并。
+    """
+    text = str(title or "").strip()
+    trail = ""
+    trail_raw = ""
+    candidate = text
+    for pattern in _TITLE_TRAIL_PATTERNS:
+        m = pattern.search(candidate)
+        if m:
+            trail = m.group(1)
+            trail_raw = candidate[m.start():]
+            candidate = candidate[:m.start()].strip()
+            break
+    lead = ""
+    lead_raw = ""
+    core = candidate
+    for pattern in _TITLE_LEAD_PATTERNS:
+        m = pattern.match(candidate)
+        if m:
+            lead = m.group(1)
+            lead_raw = candidate[:m.end()]
+            core = candidate[m.end():].strip()
+            break
+    if not core:
+        return _TitleNumberParts("", "", text, "", "")
+    return _TitleNumberParts(lead, lead_raw, core, trail_raw, trail)
+
+
+
+def _pick_representative(members: list[TitleTranslationItem]) -> TitleTranslationItem:
+    """在同组里挑一个结构最完整的成员作为翻译代表（优先有尾号、再有头号）。"""
+    def score(item: TitleTranslationItem) -> tuple[int, int]:
+        parts = _split_numbered_title(item.ko)
+        return (1 if parts.trail else 0, 1 if parts.lead else 0)
+    return max(members, key=score)
+
+
+
+def group_title_items(items: list[TitleTranslationItem]) -> list[dict[str, Any]]:
+    """把韩语标题按稳定核心分组，忽略前后编号，用于“分组检测 / 批量翻译”。
+
+    返回每组含 core、members、representative。只有组成员 >= 2 时才值得合并翻译；
+    单成员组在批量流程里走原有逐条翻译，避免回归。
+    """
+    groups: list[dict[str, Any]] = []
+    by_core: dict[str, dict[str, Any]] = {}
+    for item in items:
+        parts = _split_numbered_title(item.ko)
+        key = re.sub(r"\s+", " ", parts.core).strip()
+        if not key:
+            key = re.sub(r"\s+", " ", str(item.ko)).strip()
+        group = by_core.get(key)
+        if group is None:
+            group = {"core": key, "members": [], "representative": None}
+            by_core[key] = group
+            groups.append(group)
+        group["members"].append(item)
+    for group in groups:
+        group["representative"] = _pick_representative(group["members"])
+    return groups
+
+
+
+def _substitute_number(raw: str, old_num: str, new_num: str) -> str:
+    """在短编号段里替换开头出现的数字；若新旧相同则原样返回。"""
+    if not old_num or old_num == new_num:
+        return raw
+    return raw.replace(old_num, new_num, 1)
+
+
+
+def apply_group_translation(
+    group: dict[str, Any],
+    representative_zh: str,
+) -> list[tuple[TitleTranslationItem, str]]:
+    """把 LLM 对代表标题的译文，按同组成员各自的前后编号回填组装。
+
+    返回 [(成员, 中文标题), ...]。若成员没有某段编号（如结尾不带 (N)），
+    就丢弃对应编号段，只保留稳定核心的译文。
+    """
+    rep_parts = _split_numbered_title(representative_zh)
+    outputs: list[tuple[TitleTranslationItem, str]] = []
+    for member in group["members"]:
+        m_parts = _split_numbered_title(member.ko)
+        # 仅当代表译文和该成员都存在对应编号段时才回填；成员缺失该段则整段丢弃，避免残留 () 之类空壳。
+        lead_raw = ""
+        if rep_parts.lead_raw and m_parts.lead:
+            lead_raw = _substitute_number(rep_parts.lead_raw, rep_parts.lead, m_parts.lead)
+        trail_raw = ""
+        if rep_parts.trail_raw and m_parts.trail:
+            trail_raw = _substitute_number(rep_parts.trail_raw, rep_parts.trail, m_parts.trail)
+        member_zh = (lead_raw + rep_parts.core + trail_raw).strip()
+        outputs.append((member, member_zh))
+    return outputs
 
 
 

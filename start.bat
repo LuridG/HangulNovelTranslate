@@ -97,6 +97,8 @@ echo [OK] 环境就绪，正在启动 main.py ...
 "%VENV_PYTHON%" "%MAIN%" %*
 
 set "EXIT_CODE=%ERRORLEVEL%"
+echo %* | findstr /i /c:"--input" >nul
+if "%EXIT_CODE%"=="0" if errorlevel 1 exit /b 0
 echo.
 echo 程序已结束，退出码: %EXIT_CODE%
 pause

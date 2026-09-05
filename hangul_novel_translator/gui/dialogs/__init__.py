@@ -10,6 +10,7 @@ from .sanitizer_rule import SanitizerRuleDialog
 from .failed_chunk import FailedChunkEditorDialog
 from .malformed_block import MalformedBlockEditorDialog
 from .perspective_failed import PerspectiveFailedEditorDialog
+from .title_block import TitleTranslationDialog
 
 __all__ = [
     'FailedChunkEditorDialog',
@@ -20,4 +21,5 @@ __all__ = [
     'RetranslateResponseError',
     'RuleEditDialog',
     'SanitizerRuleDialog',
+    'TitleTranslationDialog',
 ]
