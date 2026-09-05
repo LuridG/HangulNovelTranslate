@@ -12,8 +12,8 @@
 
 | 能力 | 实现位置 |
 | :--- | :--- |
-| EPUB 多层级嵌套目录 + 多卷合并树状 TOC | `book.py` / `merge.py` / `export_epub` |
+| EPUB 多层级嵌套目录 + 多卷合并树状 TOC | `book/` / `merge/` / `book.export_epub` |
 | 专有名词全书跨度采样（前/中/后分区、预算放大、轮次偏移） | `sampling.py` |
 | EPUB 导出期文本清洗管线（Export Sanitizer） | `sanitizer.py` |
 | 成品 EPUB 词表无损原地矫正 | `epub_fixer.py` |
-| 中文 EPUB 第一人称改第三人称（独立 Tab、失败块存档、原样复制资源） | `perspective.py` / `gui.py` |
+| 中文 EPUB 第一人称改第三人称（独立 Tab、失败块存档、原样复制资源） | `perspective/` / `gui/` |

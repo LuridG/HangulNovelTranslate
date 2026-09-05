@@ -1,0 +1,20 @@
+{
+  "models": [
+    "_clean_alternatives",
+    "_merge_alternatives",
+    "GlossaryEntry",
+    "Glossary"
+  ],
+  "extract": [
+    "extract_glossary_with_llm",
+    "extract_more_glossary",
+    "enrich_glossary",
+    "_strip_full_name_occurrences",
+    "find_nickname_entries",
+    "enrich_glossary_with_nicknames"
+  ],
+  "payload": [
+    "payload_to_glossary",
+    "_entry_from_item"
+  ]
+}

@@ -1,9 +1,6 @@
-# hangul_novel_translator/book.py
+# 由 tools/split_package.py 拆分生成
 from __future__ import annotations
-
-import base64
 import html
-import json
 import os
 import posixpath
 import re
@@ -12,153 +9,28 @@ import unicodedata
 import zlib
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
-from typing import Iterable
-
-
-@dataclass
-class BlockStyle:
-    """一个块级元素（段落/标题/列表项等）的样式信息。"""
-    tag: str
-    klass: str = ""
-    style: str = ""
-    attrs: dict = field(default_factory=dict)
-
-
-@dataclass
-class ParagraphStyle:
-    """段落样式：自身块样式 + 父容器链（用于还原如 div.quote p 这类上下文样式）。"""
-    block: BlockStyle | None = None
-    ancestors: list[BlockStyle] = field(default_factory=list)
-
-
-@dataclass
-class Chapter:
-    index: int
-    title: str
-    paragraphs: list[str] = field(default_factory=list)
-    source_id: str = ""
-    styles: list[ParagraphStyle | None] = field(default_factory=list)
-    title_zh: str = ""
-    heading_level: int = 1
-    parent_index: int | None = None
-    is_section: bool = False
-
-    @property
-    def display_title(self) -> str:
-        """输出用章节名：优先已翻译的译文标题，否则用原文章节名。"""
-        return self.title_zh or self.title
-
-    @property
-    def text(self) -> str:
-        return "\n".join(self.paragraphs)
-
-    def __len__(self) -> int:
-        return len(self.text)
-
-
-@dataclass
-class Book:
-    title: str
-    chapters: list[Chapter] = field(default_factory=list)
-    source_path: Path | None = None
-    metadata: dict = field(default_factory=dict)
-
-    @property
-    def total_chars(self) -> int:
-        return sum(len(ch.text) for ch in self.chapters)
-
-
-_CHAPTER_PATTERNS = [
-    re.compile(
-        r"^\s*(?:제\s*)?(?:\d{1,4}|[一二三四五六七八九十百千零〇]+)\s*(?:장|화|부|편|권|막)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:프롤로그|에필로그|서문|발문|후기|외전|번외\s*편?|side\s*story|chapter\s*\d+|prologue|epilogue)\s*[:.]?",
-        re.IGNORECASE,
-    ),
-]
-
-
-def _looks_like_heading(line: str) -> bool:
-    line = line.strip()
-    if not line or len(line) > 90:
-        return False
-    for pattern in _CHAPTER_PATTERNS:
-        if pattern.match(line):
-            return True
-    return False
-
-
-def _decode_bytes(data: bytes) -> str:
-    last_error: Exception | None = None
-    for encoding in ("utf-8", "utf-8-sig", "cp949", "euc-kr", "utf-16"):
-        try:
-            return data.decode(encoding)
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-    return data.decode("utf-8", errors="replace")
-
-
-def _read_text_auto(path: Path) -> str:
-    data = path.read_bytes()
-    if data.startswith(b"\xef\xbb\xbf"):
-        return data.decode("utf-8-sig")
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return data.decode("utf-16")
-        except Exception:
-            pass
-    return _decode_bytes(data)
-
-
-def _chunk_paragraphs_by_chars(paragraphs: list[str], max_chars: int = 8000) -> list[list[str]]:
-    chunks: list[list[str]] = []
-    current: list[str] = []
-    size = 0
-    for para in paragraphs:
-        if current and size + len(para) + 1 > max_chars:
-            chunks.append(current)
-            current = []
-            size = 0
-        current.append(para)
-        size += len(para) + 1
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def parse_txt(path: Path) -> Book:
-    raw = _read_text_auto(path)
-    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [_strip_invisible_chars(x) for x in normalized.split("\n")]
-
-    heading_indices: list[int] = []
-    for i, line in enumerate(lines):
-        if _looks_like_heading(line):
-            heading_indices.append(i)
-
-    chapters: list[Chapter] = []
-    if heading_indices:
-        # 标题之前的零散内容作为引子。
-        pre_lines = [x for x in lines[: heading_indices[0]] if x.strip()]
-        if pre_lines:
-            chapters.append(Chapter(0, "正文", pre_lines))
-        for pos, start in enumerate(heading_indices):
-            end = heading_indices[pos + 1] if pos + 1 < len(heading_indices) else len(lines)
-            body = lines[start:end]
-            title = body[0].strip() if body else f"第 {len(chapters) + 1} 节"
-            paragraphs = [x.strip() for x in body[1:] if x.strip()]
-            chapters.append(Chapter(len(chapters), title, paragraphs))
-    else:
-        paragraphs = [x.strip() for x in lines if x.strip()]
-        for i, part in enumerate(_chunk_paragraphs_by_chars(paragraphs, 8000)):
-            chapters.append(Chapter(i, f"第 {i + 1} 节", part))
-
-    return Book(title=path.stem, chapters=chapters, source_path=path)
+from urllib.parse import (unquote, urljoin, urlparse)
+from .models import BlockStyle
+from .models import Book
+from .models import Chapter
+from .models import ParagraphStyle
+from ._consts import _DOC_PAGE_SUFFIXES
+from ._consts import _HREF_ATTR_RE
+from ._consts import _INLINE_TAGS
+from ._consts import _SKIP_PAGE_MARKERS
+from .text import _decode_bytes
+from .markup import _document_attrs
+from .markup import _encode_inline_marker
+from .markup import _inline_markers_to_html
+from .markup import _inline_style_css
+from .metadata import _looks_like_cover_image
+from .metadata import _mime_for_name
+from .metadata import _needs_cjk_font_fallback
+from .markup import _outer_container_snapshot
+from .markup import _safe_tag_attrs
+from .text import _strip_invisible_chars
+from .txt import parse_txt
 
 
 def _href_basename(href: str) -> str:
@@ -168,6 +40,7 @@ def _href_basename(href: str) -> str:
         return Path(path).name
     except Exception:
         return href
+
 
 
 def _resolve_epub_path(base_path: str, href: str) -> str:
@@ -184,10 +57,12 @@ def _resolve_epub_path(base_path: str, href: str) -> str:
         return str(href).replace("\\", "/")
 
 
+
 def _relative_epub_href(document_path: str, resource_path: str) -> str:
     """把包内资源路径转换为相对于 XHTML 文档的 href。"""
     document_dir = posixpath.dirname(document_path) or "."
     return posixpath.relpath(resource_path, start=document_dir)
+
 
 
 def _epub_package_path(base: str, href: str) -> str:
@@ -195,6 +70,7 @@ def _epub_package_path(base: str, href: str) -> str:
     value = html.unescape(unquote(str(href or ""))).replace("\\", "/")
     value = value.split("#", 1)[0].split("?", 1)[0]
     return posixpath.normpath(posixpath.join(base, value)).lstrip("/")
+
 
 
 def _prepare_epub_for_reader(path: Path) -> tuple[Path, Path | None]:
@@ -270,6 +146,7 @@ def _prepare_epub_for_reader(path: Path) -> tuple[Path, Path | None]:
         return temp_path, temp_path
 
 
+
 def _toc_href(entry) -> str:
     """取目录项的正文页文件名（无对应页返回空串）。"""
     href = getattr(entry, "href", None) or getattr(entry, "file_name", None)
@@ -278,8 +155,10 @@ def _toc_href(entry) -> str:
     return _href_basename(href)
 
 
+
 def _toc_title(entry) -> str:
     return _strip_invisible_chars(str(getattr(entry, "title", "")))
+
 
 
 def _collect_toc_hierarchy(toc, depth: int = 0, parent_href: str | None = None,
@@ -322,6 +201,7 @@ def _collect_toc_hierarchy(toc, depth: int = 0, parent_href: str | None = None,
     return out
 
 
+
 def _build_toc_tree(chapters: list[Chapter]) -> tuple:
     """把 Chapter.parent_index 关系还原为 index 级嵌套树。
 
@@ -349,17 +229,11 @@ def _build_toc_tree(chapters: list[Chapter]) -> tuple:
     return tuple(build(pos, set()) for pos in roots)
 
 
-_SKIP_PAGE_MARKERS = ("목차", "판권", "copyright")
-
-
-def _strip_invisible_chars(text: str) -> str:
-    """去掉零宽/不可见格式字符（U+200B~U+200F、U+2060~U+2064、U+FEFF 等 Cf 类字符）。"""
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
-
 
 def _normalize_title(text: str) -> str:
     """规整章节名：只去掉零宽不可见字符并折叠空白；保留 zalgo 组合装饰符（原书故意设计的美感）。"""
     return re.sub(r"\s+", " ", _strip_invisible_chars(text)).strip()
+
 
 
 def is_decorative_title(title: str) -> bool:
@@ -367,9 +241,11 @@ def is_decorative_title(title: str) -> bool:
     return any(unicodedata.category(ch) in ("Mn", "Me") for ch in title)
 
 
+
 def _is_weak_title(title: str) -> bool:
     """目录里的占位标题（如单字母 A/B、空标题）视为弱标题，优先用正文标题。"""
     return len(title) <= 2
+
 
 
 def _is_skip_marker_line(line: str) -> bool:
@@ -378,9 +254,11 @@ def _is_skip_marker_line(line: str) -> bool:
     return cleaned.lower() in _SKIP_PAGE_MARKERS
 
 
+
 def _has_skip_text_marker(paragraphs: list[str]) -> bool:
     """目录/版权页识别：只按“整行”判断，避免正文普通词（如“차례”）误杀整章。"""
     return any(_is_skip_marker_line(p) for p in paragraphs)
+
 
 
 def _collect_block_style(tag) -> BlockStyle:
@@ -392,6 +270,7 @@ def _collect_block_style(tag) -> BlockStyle:
         if value:
             attrs[key] = str(value)
     return BlockStyle(tag=tag.name, klass=klass, style=style, attrs=attrs)
+
 
 
 def _ancestor_styles(node) -> list[BlockStyle]:
@@ -427,6 +306,7 @@ def _ancestor_styles(node) -> list[BlockStyle]:
     return chain
 
 
+
 def _paragraph_style_for(block) -> ParagraphStyle | None:
     block_style = _collect_block_style(block)
     ancestors = _ancestor_styles(block)
@@ -441,8 +321,10 @@ def _paragraph_style_for(block) -> ParagraphStyle | None:
     return ParagraphStyle(block=block_style, ancestors=ancestors)
 
 
+
 def _css_urls(css: str) -> list[str]:
     return re.findall(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", css)
+
 
 
 def _collect_css_resources(book) -> list[dict]:
@@ -481,104 +363,13 @@ def _collect_css_resources(book) -> list[dict]:
 
 
 
-_MARKER_RE = re.compile("\u27e6(/?)([a-z]+)(?::([^\u27e7]*))?\u27e7")
-_INLINE_STYLE_KEYS = ("color", "background-color", "font-style", "font-weight")
-_INLINE_ATTRS = ("class", "id", "style", "title", "lang", "dir", "href", "role", "epub:type", "color", "face", "size")
-_INLINE_TAGS = {"span", "font", "a", "sup", "sub", "code", "small", "mark", "ruby", "rt"}
-
-
-def _safe_tag_attrs(tag, allowed: tuple[str, ...] = _INLINE_ATTRS) -> dict[str, str | list[str]]:
-    attrs: dict[str, str | list[str]] = {}
-    for key in allowed:
-        value = tag.get(key)
-        if value is None or key.lower().startswith("on"):
-            continue
-        if isinstance(value, list):
-            value = [str(v) for v in value]
-        else:
-            value = str(value)
-        if value:
-            attrs[key] = value
-    return attrs
-
-
-def _attrs_to_html(attrs: dict) -> str:
-    parts: list[str] = []
-    for key, value in attrs.items():
-        if str(key).startswith("__") or str(key).lower().startswith("on"):
-            continue
-        if isinstance(value, list):
-            value = " ".join(str(item) for item in value)
-        parts.append(f' {html.escape(str(key), quote=True)}="{html.escape(str(value), quote=True)}"')
-    return "".join(parts)
-
-
-def _document_attrs(tag) -> dict[str, str | list[str]]:
-    allowed = ("id", "class", "style", "lang", "dir", "title", "role", "xml:lang", "xmlns", "xmlns:epub", "epub:prefix")
-    return _safe_tag_attrs(tag, allowed) if tag is not None else {}
-
-
-def _outer_container_snapshot(body) -> list[dict]:
-    """保存 body 直接外层容器，供存档审计和旧结构兼容使用。"""
-    names = {"div", "section", "article", "aside", "main", "blockquote", "figure", "table", "ul", "ol"}
-    result: list[dict] = []
-    if body is None:
-        return result
-    for child in body.find_all(recursive=False):
-        if child.name in names:
-            result.append({"tag": child.name, "attrs": _safe_tag_attrs(child, _INLINE_ATTRS + ("align",))})
-    return result
-
-
-def _encode_inline_marker(tag_name: str, attrs: dict, inner: str) -> str:
-    payload = json.dumps({"tag": tag_name, "attrs": attrs}, ensure_ascii=False, separators=(",", ":"))
-    encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
-    return f"\u27e6x:{encoded}\u27e7{inner}\u27e6/x\u27e7"
-
-
-def _decode_inline_marker(value: str) -> tuple[str, dict] | None:
-    try:
-        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-        data = json.loads(raw.decode("utf-8"))
-        tag = str(data.get("tag", "")).lower()
-        attrs = data.get("attrs") or {}
-        if tag not in _INLINE_TAGS or not isinstance(attrs, dict):
-            return None
-        return tag, attrs
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return None
-
-
-def _inline_style_css(tag) -> str:
-    """从行内标签提取局部格式：只保留颜色/背景色/斜体/加粗等简单属性。"""
-    parts: list[str] = []
-    style = (tag.get("style") or "").strip()
-    if style:
-        for decl in style.rstrip(";").split(";"):
-            decl = decl.strip()
-            if not decl:
-                continue
-            key, _, value = decl.partition(":")
-            key = key.strip().lower()
-            value = value.strip()
-            if key in _INLINE_STYLE_KEYS and value:
-                parts.append(f"{key}:{value}")
-    if tag.name == "font":
-        color = (tag.get("color") or "").strip()
-        if color and not any(p.startswith("color:") for p in parts):
-            parts.append(f"color:{color}")
-        face = (tag.get("face") or "").strip()
-        if face and not any(p.startswith("font-family:") for p in parts):
-            parts.append(f"font-family:{face}")
-    return ";".join(parts)
-
-
 def _resolve_href(base_href: str, src: str) -> str:
     """以章节文件为基准，把 img src 解析为 epub 包内路径。"""
     try:
         return _resolve_epub_path(base_href, src)
     except Exception:
         return src
+
 
 
 def _collect_image_items(book) -> dict[str, bytes]:
@@ -589,6 +380,7 @@ def _collect_image_items(book) -> dict[str, bytes]:
         if item.get_type() == ITEM_IMAGE:
             items[str(item.get_name())] = bytes(item.get_content())
     return items
+
 
 
 def _register_image(resolved: str, image_items: dict[str, bytes], images_out: dict) -> str:
@@ -609,11 +401,13 @@ def _register_image(resolved: str, image_items: dict[str, bytes], images_out: di
     return resolved
 
 
+
 def _inline_markup_children(node, image_items: dict, base_href: str, images_out: dict) -> str:
     parts: list[str] = []
     for child in node.children:
         parts.append(_inline_markup(child, image_items, base_href, images_out))
     return "".join(parts)
+
 
 
 def _inline_markup(node, image_items: dict, base_href: str, images_out: dict) -> str:
@@ -664,75 +458,11 @@ def _inline_markup(node, image_items: dict, base_href: str, images_out: dict) ->
     return _inline_markup_children(node, image_items, base_href, images_out)
 
 
+
 def _block_text_markers(block, image_items: dict, base_href: str, images_out: dict) -> str:
     raw = _inline_markup(block, image_items, base_href, images_out)
     return _strip_invisible_chars(re.sub(r"\s+", " ", raw)).strip()
 
-
-def _open_marker_tag(name: str, value: str) -> str:
-    if name == "b":
-        return "<b>"
-    if name == "i":
-        return "<i>"
-    if name == "u":
-        return "<u>"
-    if name == "s":
-        style_attr = f' style="{html.escape(value, quote=True)}"' if value else ""
-        return f"<span{style_attr}>"
-    if name == "x":
-        decoded = _decode_inline_marker(value)
-        if not decoded:
-            return ""
-        tag, attrs = decoded
-        return f"<{tag}{_attrs_to_html(attrs)}>"
-    return ""
-
-
-def _close_marker_tag(name: str) -> str:
-    if name in ("b", "i", "u"):
-        return f"</{name}>"
-    if name == "s":
-        return "</span>"
-    if name == "x":
-        return "</span>"  # replaced by the decoder stack below
-    return ""
-
-
-def _inline_markers_to_html(text: str) -> str:
-    """把 ⟦格式⟧ 标记还原为行内 HTML；自动丢弃孤立闭合、自动闭合未闭合的配对标记。"""
-    escaped = html.escape(text, quote=False)
-    parts: list[str] = []
-    stack: list[tuple[str, str]] = []
-    pos = 0
-    for m in _MARKER_RE.finditer(escaped):
-        parts.append(escaped[pos:m.start()])
-        pos = m.end()
-        closing = m.group(1) == "/"
-        name = m.group(2)
-        value = m.group(3) or ""
-        if name == "img":
-            parts.append(f'<img src="{html.escape(value, quote=True)}" alt="插图"/>')
-        elif name == "br":
-            parts.append("<br/>")
-        elif name == "fn":
-            parts.append(f'<a href="#{html.escape(value, quote=True)}"><sup>注</sup></a>')
-        elif closing:
-            if stack and stack[-1][0] == name:
-                _, open_value = stack.pop()
-                parts.append(f"</{open_value}>" if name == "x" else _close_marker_tag(name))
-        elif name in ("b", "i", "u", "s"):
-            stack.append((name, value))
-            parts.append(_open_marker_tag(name, value))
-        elif name == "x":
-            decoded = _decode_inline_marker(value)
-            if decoded:
-                stack.append((name, decoded[0]))
-                parts.append(_open_marker_tag(name, value))
-        # 其余未知标记：忽略
-    parts.append(escaped[pos:])
-    for name, value in reversed(stack):
-        parts.append(f"</{value}>" if name == "x" else _close_marker_tag(name))
-    return "".join(parts)
 
 
 def _rewrite_inline_image_hrefs(text: str, document_path: str) -> str:
@@ -743,9 +473,6 @@ def _rewrite_inline_image_hrefs(text: str, document_path: str) -> str:
         text,
     )
 
-
-_DOC_PAGE_SUFFIXES = (".html", ".xhtml", ".htm")
-_HREF_ATTR_RE = re.compile(r"(href\s*=\s*[\"'])([^\"']+)([\"'])", re.IGNORECASE)
 
 
 def _chapter_volume(source_id: str | None) -> str:
@@ -759,6 +486,7 @@ def _chapter_volume(source_id: str | None) -> str:
         if re.fullmatch(r"v\d+", prefix):
             return prefix
     return ""
+
 
 
 def _rewrite_internal_doc_links(
@@ -805,75 +533,6 @@ def _rewrite_internal_doc_links(
     return _HREF_ATTR_RE.sub(repl, html)
 
 
-def strip_inline_markers(text: str, *, image_placeholder: str = "【插图】") -> str:
-    """去掉行内格式标记，用于 TXT 输出与词表采样。"""
-    def _repl(match) -> str:
-        return image_placeholder if match.group(2) == "img" else ""
-
-    return _MARKER_RE.sub(_repl, text)
-
-
-def metadata_to_dict(metadata: dict) -> dict:
-    """把 Book.metadata 序列化为可写入 JSON 的 dict（CSS/图片等二进制资源转 base64）。"""
-    result: dict = {}
-    for key in ("css_resources", "images"):
-        resources = metadata.get(key)
-        if not resources:
-            continue
-        serialized: list[dict] = []
-        for res in resources:
-            content = res.get("content", b"")
-            if isinstance(content, str):
-                content = content.encode("utf-8")
-            serialized.append(
-                {
-                    "name": str(res.get("name", "")),
-                    "content_b64": base64.b64encode(bytes(content)).decode("ascii"),
-                }
-            )
-        result[key] = serialized
-    inline = metadata.get("doc_inline_css")
-    if inline:
-        result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
-    chapter_css = metadata.get("chapter_css")
-    if chapter_css:
-        result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
-    structure = metadata.get("document_structure")
-    if structure:
-        result["document_structure"] = structure
-    return result
-
-
-def metadata_from_dict(data: dict | None) -> dict:
-    """metadata_to_dict 的逆操作。"""
-    data = data or {}
-    result: dict = {}
-    for key in ("css_resources", "images"):
-        resources = data.get(key)
-        if not resources:
-            continue
-        result[key] = []
-        for res in resources:
-            encoded = res.get("content_b64") or res.get("content")
-            if isinstance(encoded, str):
-                try:
-                    content = base64.b64decode(encoded)
-                except Exception:
-                    content = encoded.encode("utf-8")
-            else:
-                content = bytes(encoded or b"")
-            result[key].append({"name": str(res.get("name", "")), "content": content})
-    inline = data.get("doc_inline_css")
-    if inline:
-        result["doc_inline_css"] = {str(k): list(v) for k, v in inline.items()}
-    chapter_css = data.get("chapter_css")
-    if chapter_css:
-        result["chapter_css"] = {str(k): list(v) for k, v in chapter_css.items()}
-    structure = data.get("document_structure")
-    if structure:
-        result["document_structure"] = structure
-    return result
-
 
 def _is_standalone_image_container(node) -> bool:
     """判断容器是否是未被块级标签覆盖的图片叶节点。"""
@@ -883,6 +542,7 @@ def _is_standalone_image_container(node) -> bool:
         return False
     block_names = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "td", "th", "dt", "dd", "pre", "figcaption"}
     return not any(getattr(child, "name", None) in block_names for child in node.find_all())
+
 
 
 def _standalone_image_blocks(soup, existing_blocks: list) -> list:
@@ -902,6 +562,7 @@ def _standalone_image_blocks(soup, existing_blocks: list) -> list:
     unique = {id(node): node for node in candidates}
     order = {id(node): index for index, node in enumerate(soup.find_all())}
     return sorted(unique.values(), key=lambda node: order.get(id(node), 0))
+
 
 
 def parse_epub(path: Path, *, include_standalone_images: bool = True) -> Book:
@@ -1086,6 +747,7 @@ def parse_epub(path: Path, *, include_standalone_images: bool = True) -> Book:
     return result
 
 
+
 def load_book(path: Path) -> Book:
     path = Path(path)
     if not path.exists():
@@ -1097,70 +759,6 @@ def load_book(path: Path) -> Book:
         return parse_epub(path)
     raise ValueError("目前只支持 .txt 和 .epub 文件")
 
-
-def book_to_txt(book: Book, path: Path, encoding: str = "utf-8", sanitizer: Any = None) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = [book.title, ""]
-    for chapter in book.chapters:
-        lines.append(chapter.display_title)
-        lines.append("")
-        for para in chapter.paragraphs:
-            cleaned_para = sanitizer.clean_paragraph(para) if sanitizer else para
-            lines.append(strip_inline_markers(cleaned_para))
-            lines.append("")
-        lines.append("")
-    path.write_text("\n".join(lines), encoding=encoding)
-
-
-def _mime_for_name(name: str) -> str:
-    ext = Path(name).suffix.lower()
-    return {
-        ".css": "text/css",
-        ".ttf": "font/ttf",
-        ".otf": "font/otf",
-        ".woff": "font/woff",
-        ".woff2": "font/woff2",
-        ".eot": "application/vnd.ms-fontobject",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".svg": "image/svg+xml",
-        ".webp": "image/webp",
-    }.get(ext, "application/octet-stream")
-
-
-def _looks_like_cover_image(name: str) -> bool:
-    """按文件名判断是否为封面：去掉扩展名与非字母数字后，名称以 cover 开头。"""
-    base = Path(str(name)).name.lower()
-    stem = "".join(ch for ch in base if ch.isalnum())
-    return stem.startswith("cover")
-
-
-def _contains_cjk_text(value: str) -> bool:
-    """检测中日韩统一表意文字；用于只对中文翻译启用字体兼容层。"""
-    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", value or ""))
-
-
-def _needs_cjk_font_fallback(metadata: dict, chapters: list[Chapter]) -> bool:
-    """命中原书把正文继承到韩文字体、而译文包含中文的 EPUB。"""
-    css_text = "\n".join(
-        _as_text(res.get("content", b""))
-        for res in metadata.get("css_resources") or []
-        if str(res.get("name", "")).lower().endswith(".css")
-    )
-    return bool(re.search(r"굴림|gulim|바탕|batang|돋움|dotum|궁서|gungsuh|맑은 고딕|malgun", css_text, re.IGNORECASE)) and any(
-        _contains_cjk_text(paragraph)
-        for chapter in chapters
-        for paragraph in chapter.paragraphs
-    )
-
-
-def _as_text(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    return str(value or "")
 
 
 def _style_attrs(style: BlockStyle) -> str:
@@ -1176,6 +774,7 @@ def _style_attrs(style: BlockStyle) -> str:
     return " ".join(parts)
 
 
+
 def _block_to_html(style: ParagraphStyle | None, text: str) -> str:
     """按段落样式还原 HTML：无样式输出普通 <p>，有样式则还原标签/class/内联 style；
     段落内的 ⟦格式⟧ 标记一并还原为行内 HTML。"""
@@ -1188,6 +787,7 @@ def _block_to_html(style: ParagraphStyle | None, text: str) -> str:
 
 
 
+
 def _ancestors_key(style: ParagraphStyle | None):
     """父容器链的唯一键：连续相同键的段落合并到同一容器里，避免每个段落重复开 div。"""
     if style is None or not style.ancestors:
@@ -1195,6 +795,7 @@ def _ancestors_key(style: ParagraphStyle | None):
     return tuple(
         (a.tag, a.klass, a.style, tuple(sorted(a.attrs.items()))) for a in style.ancestors
     )
+
 
 
 def _ancestors_open(style: ParagraphStyle | None) -> str:
@@ -1207,10 +808,12 @@ def _ancestors_open(style: ParagraphStyle | None) -> str:
     return "".join(parts)
 
 
+
 def _ancestors_close(style: ParagraphStyle | None) -> str:
     if style is None:
         return ""
     return "".join(f"</{a.tag}>" for a in reversed(style.ancestors))
+
 
 
 def _restore_document_attrs(path: Path, structure: dict[str, dict]) -> None:
@@ -1275,6 +878,7 @@ def _restore_document_attrs(path: Path, structure: dict[str, dict]) -> None:
     finally:
         if temp_path.exists():
             temp_path.unlink()
+
 
 
 def export_epub(book: Book, path: Path, source_title: str | None = None, sanitizer: Any = None) -> None:

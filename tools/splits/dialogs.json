@@ -1,0 +1,21 @@
+{
+  "_common": [
+    "RetranslateResponseError"
+  ],
+  "glossary_edit": [
+    "GlossaryEditDialog"
+  ],
+  "sanitizer_rule": [
+    "SanitizerRuleDialog",
+    "RuleEditDialog"
+  ],
+  "failed_chunk": [
+    "FailedChunkEditorDialog"
+  ],
+  "malformed_block": [
+    "MalformedBlockEditorDialog"
+  ],
+  "perspective_failed": [
+    "PerspectiveFailedEditorDialog"
+  ]
+}

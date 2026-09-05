@@ -1,0 +1,82 @@
+{
+  "models": [
+    "BlockStyle",
+    "ParagraphStyle",
+    "Chapter",
+    "Book"
+  ],
+  "markup": [
+    "_decode_inline_marker",
+    "_inline_style_css",
+    "_safe_tag_attrs",
+    "_attrs_to_html",
+    "_document_attrs",
+    "_outer_container_snapshot",
+    "_encode_inline_marker",
+    "_open_marker_tag",
+    "_close_marker_tag",
+    "_inline_markers_to_html",
+    "strip_inline_markers"
+  ],
+  "metadata": [
+    "metadata_to_dict",
+    "metadata_from_dict",
+    "_mime_for_name",
+    "_looks_like_cover_image",
+    "_contains_cjk_text",
+    "_needs_cjk_font_fallback",
+    "_as_text"
+  ],
+  "txt": [
+    "_looks_like_heading",
+    "_read_text_auto",
+    "_chunk_paragraphs_by_chars",
+    "parse_txt",
+    "book_to_txt"
+  ],
+  "text": [
+    "_decode_bytes",
+    "_strip_invisible_chars"
+  ],
+  "epub": [
+    "_href_basename",
+    "_resolve_epub_path",
+    "_relative_epub_href",
+    "_epub_package_path",
+    "_prepare_epub_for_reader",
+    "_toc_href",
+    "_toc_title",
+    "_collect_toc_hierarchy",
+    "_build_toc_tree",
+    "_normalize_title",
+    "is_decorative_title",
+    "_is_weak_title",
+    "_is_skip_marker_line",
+    "_has_skip_text_marker",
+    "_collect_block_style",
+    "_ancestor_styles",
+    "_paragraph_style_for",
+    "_css_urls",
+    "_collect_css_resources",
+    "_resolve_href",
+    "_collect_image_items",
+    "_register_image",
+    "_inline_markup_children",
+    "_inline_markup",
+    "_block_text_markers",
+    "_rewrite_inline_image_hrefs",
+    "_chapter_volume",
+    "_rewrite_internal_doc_links",
+    "_is_standalone_image_container",
+    "_standalone_image_blocks",
+    "parse_epub",
+    "load_book",
+    "_style_attrs",
+    "_block_to_html",
+    "_ancestors_key",
+    "_ancestors_open",
+    "_ancestors_close",
+    "_restore_document_attrs",
+    "export_epub"
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "models": [
+    "PerspectiveError",
+    "PerspectiveCancelled",
+    "PerspectiveOptions",
+    "PerspectiveBlock",
+    "PerspectiveFailedBlock"
+  ],
+  "analysis": [
+    "_is_html",
+    "_node_text",
+    "_marker_value",
+    "_has_marker",
+    "_has_dialogue",
+    "_is_inner_monologue",
+    "_is_letter_or_quote",
+    "_text_nodes",
+    "_contains_block_ancestor",
+    "_iter_content_blocks",
+    "_eligible",
+    "_block_from_node",
+    "_style_instruction",
+    "build_perspective_prompt",
+    "_document_has_nav",
+    "_skip_document",
+    "_apply_segments",
+    "_decode_xhtml",
+    "_raw_text_positions",
+    "_replace_raw_blocks"
+  ],
+  "rewrite": [
+    "_preserve_edge_whitespace",
+    "_parse_rewrite_payload",
+    "rewrite_blocks",
+    "_batch_blocks"
+  ],
+  "state": [
+    "_safe_state_name",
+    "_source_fingerprint",
+    "perspective_state_path",
+    "_state_options",
+    "_block_state",
+    "load_failed_perspective_blocks",
+    "load_perspective_state",
+    "save_manual_perspective_translation",
+    "save_perspective_failure"
+  ],
+  "converter": [
+    "inspect_perspective_epub",
+    "PerspectiveConverter",
+    "render_perspective_state",
+    "reset_perspective_state"
+  ]
+}

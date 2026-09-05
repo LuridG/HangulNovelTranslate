@@ -261,18 +261,62 @@ hangulTranslate/
 │  ├─ __init__.py
 │  ├─ gui/                            # 图形界面（主窗口、主题、状态、控件、对话框）
 │  │  ├─ __init__.py
-│  │  ├─ app.py                       # 主窗口 App + run_gui（词表 + 多卷修正 + 视角转换）
+│  │  ├─ app.py                       # 主窗口 App（薄壳：聚合各 View mixin）+ run_gui
+│  │  ├─ views/                       # 各 tab 的 View mixin（App 通过继承聚合实现）
+│  │  │  ├─ __init__.py
+│  │  │  ├─ shell_mixin.py            # 布局/分栏/窗口几何/翻译主流程
+│  │  │  ├─ left_panel_mixin.py       # 左侧输入文件与 API/翻译参数
+│  │  │  ├─ glossary_mixin.py         # 词表 tab
+│  │  │  ├─ settings_mixin.py         # 设置 tab
+│  │  │  ├─ fixer_mixin.py            # 成品矫正 tab
+│  │  │  ├─ merge_mixin.py            # 多卷修正 tab
+│  │  │  └─ perspective_mixin.py      # 视角转换 tab
 │  │  ├─ theme.py                     # 配色与 Tk 主题
 │  │  ├─ state.py                     # .gui_config.json 读写（窗口尺寸/分栏宽度）
 │  │  ├─ widgets.py                   # TreeviewTooltip、DebouncedScrollableFrame
-│  │  └─ dialogs.py                   # 词表/清洗/失败块等编辑弹窗
+│  │  └─ dialogs/                     # 每个对话框一个子模块
+│  │     ├─ __init__.py
+│  │     ├─ glossary_edit.py          # 词条编辑弹窗
+│  │     ├─ sanitizer_rule.py         # 导出清洗规则弹窗
+│  │     ├─ failed_chunk.py           # 失败块查看/补翻
+│  │     ├─ malformed_block.py        # 畸形块查看/批量修复/回翻
+│  │     └─ perspective_failed.py     # 视角转换失败块查看/重试
 │  ├─ config.py                       # 配置（AppConfig）
 │  ├─ llm.py                          # OpenAI 兼容客户端
-│  ├─ book.py                         # TXT/EPUB 解析与导出（含脚注链接改写）
-│  ├─ glossary.py                     # 专有名词词表（含译名历史）
-│  ├─ merge.py                        # 多卷修正：存档重组、拼合、词表修正与输出
-│  ├─ perspective.py                  # 中文 EPUB 第一人称改第三人称（独立状态与无损资源复制）
-│  ├─ translator.py                   # 分片、翻译、续传、组装、失败块重试
+│  ├─ book/                           # TXT/EPUB 解析与导出（含脚注链接改写）
+│  │  ├─ __init__.py
+│  │  ├─ models.py                    # BlockStyle/ParagraphStyle/Chapter/Book
+│  │  ├─ markup.py                    # 行内格式/标记
+│  │  ├─ metadata.py                  # 元数据与封面/字体回退
+│  │  ├─ txt.py                       # TXT 解析与导出
+│  │  ├─ text.py                      # 共用文本工具
+│  │  └─ epub.py                      # EPUB 读取与导出
+│  ├─ glossary/                       # 专有名词词表
+│  │  ├─ __init__.py
+│  │  ├─ models.py                    # GlossaryEntry/Glossary
+│  │  ├─ extract.py                   # LLM 抽取/丰富
+│  │  └─ payload.py                   # 载荷解析
+│  ├─ merge/                          # 多卷修正：存档重组、拼合、词表修正与输出
+│  │  ├─ __init__.py
+│  │  ├─ state.py                     # 存档审查/审计/重组
+│  │  ├─ resources.py                 # CSS/图片等静态资源合并
+│  │  ├─ books.py                     # 书目拼合与词表修正
+│  │  └─ export.py                    # 导出
+│  ├─ perspective/                    # 中文 EPUB 第一人称改第三人称
+│  │  ├─ __init__.py
+│  │  ├─ models.py                    # 选项/块/失败块
+│  │  ├─ analysis.py                  # 节点扫描与分类
+│  │  ├─ rewrite.py                   # 改写载荷
+│  │  ├─ state.py                     # 存档读写
+│  │  └─ converter.py                 # PerspectiveConverter
+│  ├─ translator/                     # 分片、翻译、续传、组装、失败块重试
+│  │  ├─ __init__.py
+│  │  ├─ models.py                    # Chunk/FailedChunk/TranslationResult
+│  │  ├─ response.py                  # 模型响应清洗/归一化
+│  │  ├─ malformed.py                 # 畸形块检测/修复
+│  │  ├─ chunking.py                  # 分块与采样
+│  │  ├─ state.py                     # 翻译存档读写
+│  │  └─ pipeline.py                  # Translator 编排
 │  ├─ sampling.py                     # 专有名词全书跨度采样
 │  ├─ sanitizer.py                    # 导出期文本清洗（Export Sanitizer）
 │  ├─ epub_fixer.py                   # 成品 EPUB 词表无损原地矫正

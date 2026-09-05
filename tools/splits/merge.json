@@ -1,0 +1,31 @@
+{
+  "state": [
+    "hangul_char_count",
+    "review_translation_state",
+    "audit_translation_state",
+    "inspect_state",
+    "detect_merge_title",
+    "archive_filename_title",
+    "_chunk_config",
+    "book_from_state",
+    "repair_image_state"
+  ],
+  "resources": [
+    "_is_path_escape",
+    "_safe_resource_name",
+    "_as_bytes",
+    "_rewrite_css_urls",
+    "_rewrite_css_imports",
+    "_css_dependencies_match",
+    "_rewrite_image_markers",
+    "_merge_static_resources"
+  ],
+  "books": [
+    "merge_books",
+    "preview_fix",
+    "fix_book"
+  ],
+  "export": [
+    "export_merged"
+  ]
+}

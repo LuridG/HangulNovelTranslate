@@ -3,6 +3,25 @@
 > 本文件汇总 `docs/` 中尚未落地的功能方案（原方案 05「进阶功能」、06「TXT 增强」的剩余项）。
 > 已实现的功能已在根目录 [`README.md`](../README.md) 与代码中体现，不再单独保留方案文档。
 
+## 架构拆分（进行中）
+
+已按职责把若干单体模块拆成包子模块，子模块 `__init__.py` 回导出全部公共接口，
+对外 import 保持不变：
+
+- `book.py` → `book/`（`models` 数据类 / `markup` 行内标记 / `metadata` 元数据 / `txt` 文本输入输出 / `epub` EPUB 读取与导出 / `text` 共用文本工具）
+- `translator.py` → `translator/`（`models` / `response` 响应清洗 / `malformed` 畸形块 / `chunking` 分块 / `state` 存档 / `pipeline` 编排）
+- `perspective.py` → `perspective/`（`models` / `analysis` 节点分析 / `rewrite` 改写 / `state` 存档 / `converter` 转换器）
+- `merge.py` → `merge/`（`state` 状态审查 / `resources` 静态资源合并 / `books` 书目合并 / `export` 导出）
+- `glossary.py` → `glossary/`（`models` / `extract` LLM 抽取 / `payload` 载荷解析）
+- `gui/dialogs.py` → `gui/dialogs/`（每个对话框一个子模块）
+
+拆分工具与导入校验见 [`tools/`](../tools/)。
+
+- [x] `gui/app.py`（原来 2654 行的单体）按 tab 拆成 `gui/views/` 下的一组 View mixin，`App` 通过继承聚合实现；
+  窗口几何 / 语言翻译主流程归入 `shell_mixin`，各 tab 的构建与事件归入对应 mixin。
+- [ ] `.venv` 桌面环境复跑 `tests/`（bundled 运行时缺 `openai/bs4/ebooklib`，仅能覆盖纯逻辑部分）；
+  并按 AGENTS 约定用 `start.bat` 人工验证 Tk/customtkinter 渲染与各 tab 交互。
+
 ## 第一人称改第三人称（已实现）
 
 已完成：独立「视角转换」tab，输入已翻译/多卷合并后的中文 EPUB，默认只改写叙述性旁白；对白、书信/聊天、日记、引用和内心独白默认保护。支持主角名称、简称、代词、替换风格、外部词表、范围预览、独立状态文件、失败块查看、单块/批量切换模型和手动补写。
@@ -43,7 +62,7 @@
 
 ## TXT 输入增强（TXT Input Enhancements）
 
-- [ ] 扩充章节识别正则并接入 `book.py::parse_txt`：`#01`、`EP.01`、`[1화]`、`〈01〉`、`No.12` 等非标前缀；复合副标题；英文/罗马数字章节
+- [ ] 扩充章节识别正则并接入 `book/txt.py::parse_txt`：`#01`、`EP.01`、`[1화]`、`〈01〉`、`No.12` 等非标前缀；复合副标题；英文/罗马数字章节
 - [ ] 智能空行/分割线分章 fallback：未命中标题时检测 `***`、`---`、`◆◆◆`、`===` 与连续空行切分，替代按 8000 字硬切
 - [ ] 硬换行合并（`unwrap_broken_paragraphs`）：上一行未以句末标点结尾且下一行非对话引号时合并为一段（逻辑已在 `tests/test_txt_parser.py`，需接入产品代码）
 - [ ] 爬虫广告清洗：剔除正文首/末 10 行的广告与 TXT 分享者签名
