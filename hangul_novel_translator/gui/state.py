@@ -9,6 +9,8 @@ from typing import Any
 _UI_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / ".gui_config.json"
 _COMMON_GLOSSARY_PATH = Path(__file__).resolve().parent.parent.parent / "common_glossary.json"
 _COMMON_GLOSSARY_TEMPLATE = Path(__file__).resolve().parent.parent.parent / "common_glossary.template.json"
+_FORMAT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "format_template.json"
+_FORMAT_TEMPLATE_TEMPLATE = Path(__file__).resolve().parent.parent.parent / "format_template.template.json"
 
 
 def _load_ui_state() -> dict[str, Any]:
@@ -35,6 +37,16 @@ def common_glossary_path() -> Path:
 def common_glossary_template_path() -> Path:
     """通用词表初始模板路径（入库文件，首次启动时据此生成本地通用词表）。"""
     return _COMMON_GLOSSARY_TEMPLATE
+
+
+def format_template_path() -> Path:
+    """格式模板持久化路径（项目根目录，机器本地用户数据）。"""
+    return _FORMAT_TEMPLATE_PATH
+
+
+def format_template_template_path() -> Path:
+    """格式模板初始模板路径（入库文件，首次启动时据此生成本地格式模板）。"""
+    return _FORMAT_TEMPLATE_TEMPLATE
 
 
 

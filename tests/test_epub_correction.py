@@ -1,12 +1,14 @@
 import tempfile
 import unittest
 import zipfile
+import json
 import re
 from pathlib import Path
 
 from hangul_novel_translator.epub_correction import (
     _extract_body_title_from,
     _looks_like_body_title,
+    FormatTemplate,
     apply_add_format,
     apply_clear_format,
     apply_reassemble,
@@ -14,6 +16,7 @@ from hangul_novel_translator.epub_correction import (
     detect_format,
     infer_body_title_match,
     infer_placeholder_pattern,
+    load_format_template,
     preview_add_format,
     preview_clear_format,
     preview_reassemble,
@@ -258,6 +261,170 @@ class LLMTitleInferenceTest(unittest.TestCase):
             self.assertTrue(
                 any("起因 (1)" in item["head"] for item in result["sample"])
             )
+
+
+class FormatTemplateTest(unittest.TestCase):
+    def test_default_template_renders_note_and_word_count(self):
+        tpl = FormatTemplate()
+        note = tpl.render_note(
+            total_chars=2544524,
+            minutes=6361,
+            chapter_count=673,
+            cover_font="source.ttf（自用字体）",
+            generated_at="2026-09-05 12:00:00",
+        )
+        self.assertIn("【制作说明】", note)
+        self.assertIn("生成时间：2026-09-05 12:00:00", note)
+        self.assertIn("• 总字数：2,544,524 字", note)
+        self.assertIn("• 预计阅读时长：约 6361 分钟", note)
+        self.assertIn("• 总章节：673 章", note)
+        self.assertEqual(tpl.render_word_count(4277), "(本章字数: 4277)")
+
+    def test_custom_template_placeholders_substitute(self):
+        tpl = FormatTemplate(
+            production_title="自定义说明",
+            production_lines=["总字数 ${total_chars}", "章节 {chapter_count}"],
+            word_count_template="本章字数：${chars}",
+            word_count_style={"align": "center", "color": "gray"},
+        )
+        note = tpl.render_note(
+            total_chars=12345, minutes=30, chapter_count=7, cover_font="sys"
+        )
+        self.assertEqual(note, ["总字数 12,345", "章节 7"])
+        self.assertEqual(tpl.render_word_count(100), "本章字数：100")
+
+    def test_placeholder_aliases_work(self):
+        tpl = FormatTemplate(
+            production_lines=["章节 ${chapteramount}", "字数 ${wordcount}"],
+            word_count_template="《${word_count}》",
+        )
+        note = tpl.render_note(
+            total_chars=10, minutes=1, chapter_count=7, cover_font="x"
+        )
+        self.assertEqual(note[0], "章节 7")
+        self.assertEqual(tpl.render_word_count(42), "《42》")
+
+    def test_load_format_template_reads_json_and_falls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "custom.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "production_title": "测试说明",
+                        "production_lines": ["${total_chars}"],
+                        "word_count_template": "${chars} 字",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            tpl = load_format_template(path)
+            self.assertEqual(tpl.production_title, "测试说明")
+            self.assertEqual(tpl.render_word_count(42), "42 字")
+            # 不存在 / 损坏时回落默认
+            missing = load_format_template(Path(td) / "nope.json")
+            self.assertEqual(missing.production_title, "制作说明")
+
+    def test_apply_add_format_uses_custom_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            tpl = FormatTemplate(
+                production_title="制作说明",
+                production_lines=["自定义制作说明", "总字数 ${total_chars}"],
+                word_count_template="本章字数：${chars}",
+                word_count_style={"align": "center", "color": "gray"},
+            )
+            src = self._build(Path(td))
+            out = Path(td) / "custom_styled.epub"
+            apply_add_format(src, out, template=tpl)
+            result = detect_format(out)
+            self.assertTrue(result["has_production_note"])
+            self.assertEqual(result["production"][0]["title"], "制作说明")
+            self.assertGreaterEqual(result["word_count_count"], 2)
+            with zipfile.ZipFile(out, "r") as z:
+                html = [
+                    n
+                    for n in z.namelist()
+                    if n.lower().endswith((".xhtml", ".html"))
+                ]
+                styled = any(
+                    "text-align:center" in z.read(n).decode("utf-8")
+                    and "color:gray" in z.read(n).decode("utf-8")
+                    for n in html
+                )
+                self.assertTrue(styled)
+
+    def test_apply_add_format_injects_title_css(self):
+        with tempfile.TemporaryDirectory() as td:
+            tpl = FormatTemplate(
+                title_enabled=True,
+                title_style={
+                    "align": "center",
+                    "color": "#FF8800",
+                    "font_size": "1.4em",
+                    "bold": True,
+                },
+            )
+            src = self._build(Path(td))
+            out = Path(td) / "title_css.epub"
+            result = apply_add_format(src, out, template=tpl)
+            self.assertTrue(result["title_css"])
+            self.assertIn(".chapter-title", result["title_css"])
+            with zipfile.ZipFile(out, "r") as z:
+                css_names = [
+                    n for n in z.namelist() if n.lower().endswith(".css")
+                ]
+                css_content = "\n".join(
+                    z.read(n).decode("utf-8") for n in css_names
+                )
+                self.assertIn(".chapter-title", css_content)
+                self.assertIn("text-align:center", css_content)
+                self.assertIn("color:#FF8800", css_content)
+                html_names = [
+                    n
+                    for n in z.namelist()
+                    if n.lower().endswith((".xhtml", ".html"))
+                ]
+                self.assertTrue(
+                    any(
+                        'class="chapter-title"' in z.read(n).decode("utf-8")
+                        for n in html_names
+                    )
+                )
+
+    def _build(self, tmp: Path) -> Path:
+        src = epub_lib.EpubBook()
+        src.set_identifier("template-fixture")
+        src.set_title("测试书")
+        src.set_language("zh")
+        chapters = [
+            ("cover.xhtml", "测试书 第1卷", "", 1),
+            (
+                "ep0.xhtml",
+                "EP.0",
+                '<p>(本章字数: 20)</p><p>正文内容。</p>',
+                2,
+            ),
+            (
+                "ep1.xhtml",
+                "EP.1",
+                '<p>(本章字数: 30)</p><p>正文内容。</p>',
+                2,
+            ),
+        ]
+        links = []
+        for file_name, title, body, level in chapters:
+            item = epub_lib.EpubHtml(
+                uid=file_name, title=title, file_name=file_name, lang="zh"
+            )
+            item.content = _html(title, body, level)
+            src.add_item(item)
+            links.append(epub_lib.Link(file_name, title, file_name))
+        src.toc = tuple(links)
+        src.add_item(epub_lib.EpubNcx())
+        src.add_item(epub_lib.EpubNav())
+        src.spine = ["nav"] + [name for name, _, _, _ in chapters]
+        path = tmp / "book.epub"
+        epub_lib.write_epub(str(path), src)
+        return path
 
 
 if __name__ == "__main__":

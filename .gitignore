@@ -9,6 +9,7 @@ data/
 .gui_state.json
 .gui_config.json
 common_glossary.json
+format_template.json
 ._setup/
 .python/
 BAT脚本详解.md

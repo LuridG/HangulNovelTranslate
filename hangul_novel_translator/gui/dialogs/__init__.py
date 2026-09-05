@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ._common import RetranslateResponseError
+from .format_template import FormatTemplateEditDialog
 from .glossary_edit import GlossaryEditDialog
 from .sanitizer_rule import RuleEditDialog
 from .sanitizer_rule import SanitizerRuleDialog
@@ -12,6 +13,7 @@ from .perspective_failed import PerspectiveFailedEditorDialog
 
 __all__ = [
     'FailedChunkEditorDialog',
+    'FormatTemplateEditDialog',
     'GlossaryEditDialog',
     'MalformedBlockEditorDialog',
     'PerspectiveFailedEditorDialog',

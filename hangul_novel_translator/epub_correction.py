@@ -10,12 +10,188 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .book import Book, Chapter, export_epub, load_book
+from .book import BlockStyle, Book, Chapter, ParagraphStyle, export_epub, load_book
+
+
+# ---------------- 格式模板（制作说明 + 每章字数） ----------------
+# 用户可通过「编辑格式模板」修改下面这些默认字符串；占位符说明：
+#   ${generated_at}    生成时间（如 2026-09-05 12:00:00）
+#   ${total_chars}     全书正文总字数（自动加千分位）
+#   ${minutes}         预计阅读时长（分钟）
+#   ${chapter_count}   章节总数
+#   ${cover_font}      封面字体
+#   ${chars}           每章字数（用于「每章字数模板」）
+_DEFAULT_PRODUCTION_TITLE = "制作说明"
+_DEFAULT_PRODUCTION_LINES = [
+    "【制作说明】",
+    "生成时间：${generated_at}",
+    "制作工具：韩语小说批量翻译工具",
+    "---------------------------",
+    "【书籍统计】",
+    "• 总字数：${total_chars} 字",
+    "• 预计阅读时长：约 ${minutes} 分钟",
+    "• 总章节：${chapter_count} 章",
+    "• 封面字体：${cover_font}（自用字体）",
+    "• 正文字体：系统默认字体",
+    "• 标题字体：同正文字体",
+    "本电子书由程序自动生成，仅供个人学习及预览使用，请支持正版。",
+]
+_DEFAULT_PRODUCTION_STYLE: dict[str, Any] = {}
+_DEFAULT_WORD_COUNT_TEMPLATE = "(本章字数: ${chars})"
+_DEFAULT_WORD_COUNT_STYLE: dict[str, Any] = {}
+
+
+def _substitute_format(text: str, context: dict) -> str:
+    """替换模板占位符，兼容 ${name} 与 {name} 两种写法。"""
+    if not text:
+        return text
+
+    def replace(match: re.Match) -> str:
+        name = match.group(1) or match.group(2)
+        value = context.get(name, "")
+        return "" if value is None else str(value)
+
+    return re.sub(r"\$\{(\w+)\}|\{(\w+)\}", replace, text)
+
+
+def _style_dict_to_css(style: dict | None) -> str:
+    """把 GUI 使用的样式字典转成内联 CSS 文本。"""
+    if not style:
+        return ""
+    mapping: dict[str, tuple[str, Callable[[Any], Any]]] = {
+        "align": ("text-align", lambda v: v),
+        "color": ("color", lambda v: v),
+        "font_size": ("font-size", lambda v: v),
+        "font_family": ("font-family", lambda v: v),
+        "bold": ("font-weight", lambda v: ("bold" if v else None)),
+        "italic": ("font-style", lambda v: ("italic" if v else None)),
+        "margin_bottom": ("margin-bottom", lambda v: v),
+        "margin": ("margin", lambda v: v),
+        "letter_spacing": ("letter-spacing", lambda v: v),
+        "line_height": ("line-height", lambda v: v),
+        "background": ("background", lambda v: v),
+        "padding": ("padding", lambda v: v),
+    }
+    parts: list[str] = []
+    for key, (prop, transform) in mapping.items():
+        if key not in style:
+            continue
+        value = transform(style[key])
+        if value is None or value == "":
+            continue
+        parts.append(f"{prop}:{value}")
+    return "; ".join(parts)
+
+
+def _style_for(style_dict: dict | None) -> ParagraphStyle | None:
+    """由样式字典生成段落样式；空样式返回 None（渲染成普通 <p>）。"""
+    css = _style_dict_to_css(style_dict)
+    if not css:
+        return None
+    return ParagraphStyle(block=BlockStyle(tag="p", style=css))
+
+
+def _title_css_rule(style: dict | None, class_name: str = "chapter-title") -> str:
+    """由标题样式字典生成 CSS 规则；空样式返回空串（不注入标题排版）。"""
+    css = _style_dict_to_css(style)
+    if not css:
+        return ""
+    safe_class = re.sub(r"[^A-Za-z0-9_-]", "", class_name or "") or "chapter-title"
+    return f".{safe_class} {{ {css}; }}"
+
+
+@dataclass
+class FormatTemplate:
+    """制作说明 + 每章字数统计的编辑模板。"""
+
+    production_title: str = _DEFAULT_PRODUCTION_TITLE
+    production_lines: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_PRODUCTION_LINES)
+    )
+    production_style: dict = field(default_factory=dict)
+    word_count_template: str = _DEFAULT_WORD_COUNT_TEMPLATE
+    word_count_style: dict = field(default_factory=dict)
+    title_enabled: bool = False
+    title_style: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "production_title": self.production_title,
+            "production_lines": list(self.production_lines),
+            "production_style": dict(self.production_style),
+            "word_count_template": self.word_count_template,
+            "word_count_style": dict(self.word_count_style),
+            "title_enabled": bool(self.title_enabled),
+            "title_style": dict(self.title_style),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FormatTemplate":
+        if not isinstance(data, dict):
+            return cls()
+        return cls(
+            production_title=(data.get("production_title") or _DEFAULT_PRODUCTION_TITLE),
+            production_lines=(data.get("production_lines") or list(_DEFAULT_PRODUCTION_LINES)),
+            production_style=(data.get("production_style") or {}),
+            word_count_template=(data.get("word_count_template") or _DEFAULT_WORD_COUNT_TEMPLATE),
+            word_count_style=(data.get("word_count_style") or {}),
+            title_enabled=bool(data.get("title_enabled")),
+            title_style=(data.get("title_style") or {}),
+        )
+
+    def render_note(
+        self,
+        *,
+        total_chars: int,
+        minutes: int,
+        chapter_count: int,
+        cover_font: str,
+        generated_at: str | None = None,
+    ) -> list[str]:
+        minutes_int = int(minutes)
+        chapter_int = int(chapter_count)
+        context = {
+            "generated_at": generated_at or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_chars": f"{int(total_chars):,}",
+            "minutes": str(minutes_int),
+            "chapter_count": str(chapter_int),
+            "chapteramount": str(chapter_int),
+            "chapter_amount": str(chapter_int),
+            "cover_font": cover_font or "",
+        }
+        return [_substitute_format(line, context) for line in self.production_lines]
+
+    def render_word_count(self, chars: int) -> str:
+        chars_int = int(chars)
+        return _substitute_format(
+            self.word_count_template,
+            {"chars": str(chars_int), "word_count": str(chars_int), "wordcount": str(chars_int)},
+        )
+
+    def title_css(self) -> str:
+        """开启标题排版时返回 CSS 规则文本，否则返回空串。"""
+        if not self.title_enabled:
+            return ""
+        return _title_css_rule(self.title_style)
+
+
+def load_format_template(path: str | Path | None = None) -> FormatTemplate:
+    """加载格式模板；文件缺失/损坏时回落到内置默认模板。"""
+    if path is not None:
+        p = Path(path)
+        if p.exists():
+            try:
+                return FormatTemplate.from_dict(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:  # noqa: BLE001
+                pass
+    return FormatTemplate()
 
 
 # ---------------- 格式标记正则 ----------------
@@ -41,6 +217,14 @@ def _is_production_chapter(ch: Chapter) -> bool:
         return True
     joined = "".join(ch.paragraphs or [])
     return any(marker in joined for marker in _PROD_BODY_MARKERS)
+
+
+def _is_production_like(ch: Chapter, production_title: str | None = None) -> bool:
+    """判断是否制作说明章节：命中内置标记，或标题等于当前模板标题。"""
+    if _is_production_chapter(ch):
+        return True
+    title = (production_title or "").strip()
+    return bool(title) and (ch.title or "").strip() == title
 
 
 def _filter_paragraphs(
@@ -263,10 +447,14 @@ def apply_clear_format(
 def preview_add_format(
     epub_path: str | Path,
     *,
-    cover_font: str = "source.ttf（自用字体）",
+    cover_font: str = "source.ttf",
+    template: FormatTemplate | None = None,
 ) -> dict[str, Any]:
+    tpl = template or FormatTemplate()
     book = load_book(epub_path)
-    book.chapters = [ch for ch in book.chapters if not _is_production_chapter(ch)]
+    book.chapters = [
+        ch for ch in book.chapters if not _is_production_like(ch, tpl.production_title)
+    ]
     total_chars = 0
     per_chapter: list[dict[str, Any]] = []
     for ch in book.chapters:
@@ -274,13 +462,21 @@ def preview_add_format(
         total_chars += n
         per_chapter.append({"title": ch.title, "chars": n})
     minutes = max(0, total_chars // 400)
-    note = _build_production_note(total_chars, minutes, len(book.chapters), cover_font)
+    note = tpl.render_note(
+        total_chars=total_chars,
+        minutes=minutes,
+        chapter_count=len(book.chapters),
+        cover_font=cover_font,
+    )
+    title_css = tpl.title_css()
     return {
         "total_chars": total_chars,
         "chapter_count": len(book.chapters),
         "predicted_minutes": minutes,
         "per_chapter_count": len(per_chapter),
         "note_body": note,
+        "title_css": title_css,
+        "title_css_enabled": bool(title_css),
     }
 
 
@@ -288,12 +484,16 @@ def apply_add_format(
     epub_path: str | Path,
     output_path: str | Path,
     *,
-    cover_font: str = "source.ttf（自用字体）",
+    cover_font: str = "source.ttf",
     source_title: str | None = None,
+    template: FormatTemplate | None = None,
 ) -> dict[str, Any]:
+    tpl = template or FormatTemplate()
     book = load_book(epub_path)
     # 先去掉旧制作说明与旧字数行，避免重复叠加。
-    book.chapters = [ch for ch in book.chapters if not _is_production_chapter(ch)]
+    book.chapters = [
+        ch for ch in book.chapters if not _is_production_like(ch, tpl.production_title)
+    ]
     for ch in book.chapters:
         keep_p, keep_s = _filter_paragraphs(
             ch.paragraphs, ch.styles, lambda p: not _is_word_count_line(p)
@@ -313,19 +513,35 @@ def apply_add_format(
         total_chars += n
         per_chapter.append({"title": ch.title, "chars": n})
         if n > 0:
-            ch.paragraphs.insert(0, f"(本章字数: {n})")
-            ch.styles.insert(0, None)
+            ch.paragraphs.insert(0, tpl.render_word_count(n))
+            ch.styles.insert(0, _style_for(tpl.word_count_style))
 
     minutes = max(0, total_chars // 400)
-    note = _build_production_note(total_chars, minutes, len(book.chapters), cover_font)
+    note = tpl.render_note(
+        total_chars=total_chars,
+        minutes=minutes,
+        chapter_count=len(book.chapters),
+        cover_font=cover_font,
+    )
     note_chars = sum(len(p) for p in note)
+    note_word = tpl.render_word_count(note_chars)
     production_chapter = Chapter(
         index=0,
-        title="制作说明",
-        paragraphs=[f"(本章字数: {note_chars})"] + note,
-        styles=[None] * (len(note) + 1),
+        title=tpl.production_title,
+        paragraphs=[note_word] + note,
+        styles=[_style_for(tpl.word_count_style)]
+        + [_style_for(tpl.production_style) for _ in note],
         heading_level=2,
     )
+    # 标题 CSS 排版：写入独立样式表，导出时给每个章节标题加 .chapter-title 关联。
+    title_css = tpl.title_css()
+    if title_css:
+        book.metadata["title_css"] = {
+            "class": "chapter-title",
+            "css": title_css,
+        }
+    else:
+        book.metadata.pop("title_css", None)
     # 第一卷封面页（无正文、标题层级 1）之后插入制作说明；否则放在最前。
     if insert_after_cover:
         production_chapter.parent_index = book.chapters[0].index
@@ -338,6 +554,7 @@ def apply_add_format(
         "total_chars": total_chars,
         "chapter_count": len(book.chapters),
         "per_chapter_count": len(per_chapter),
+        "title_css": title_css,
         "output": str(output_path),
     }
 
@@ -348,20 +565,12 @@ def _build_production_note(
     chapter_count: int,
     cover_font: str,
 ) -> list[str]:
-    return [
-        "【制作说明】",
-        f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
-        "制作工具：韩语小说批量翻译工具",
-        "---------------------------",
-        "【书籍统计】",
-        f"• 总字数：{total_chars:,} 字",
-        f"• 预计阅读时长：约 {minutes} 分钟",
-        f"• 总章节：{chapter_count} 章",
-        f"• 封面字体：{cover_font}（自用字体）",
-        "• 正文字体：系统默认字体",
-        "• 标题字体：同正文字体",
-        "本电子书由程序自动生成，仅供个人学习及预览使用，请支持正版。",
-    ]
+    return FormatTemplate().render_note(
+        total_chars=total_chars,
+        minutes=minutes,
+        chapter_count=chapter_count,
+        cover_font=cover_font,
+    )
 
 
 # ---------------- 标题重分（正则重断章） ----------------

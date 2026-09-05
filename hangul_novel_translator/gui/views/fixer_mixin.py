@@ -22,6 +22,7 @@ from ...epub_fixer import (fix_finished_epub_in_place, preview_finished_epub)
 from ...epub_correction import (
     DEFAULT_BODY_TITLE_PATTERN,
     DEFAULT_PREFIX_PATTERN,
+    FormatTemplate,
     apply_add_format,
     apply_clear_format,
     apply_reassemble,
@@ -29,6 +30,7 @@ from ...epub_correction import (
     detect_format,
     infer_body_title_match,
     infer_placeholder_pattern,
+    load_format_template,
     preview_add_format,
     preview_clear_format,
     preview_reassemble,
@@ -41,9 +43,13 @@ from ...perspective import (PerspectiveBlock, PerspectiveConverter, PerspectiveF
 from ...translator import (FailedChunk, TranslationCancelled, TranslationResult, Translator, collect_sample_text_strided, detect_malformed_blocks, format_sample_chapters, load_failed_chunks, reconcile_paragraphs, save_manual_translation, sample_chapter_report)
 from ...utils import (extract_json, parse_paragraphs_from_payload)
 from ..theme import (THEME, _apply_ttk_theme)
-from ..state import (_load_ui_state, _save_ui_state)
+from ..state import (
+    _load_ui_state,
+    _save_ui_state,
+    format_template_path,
+)
 from ..widgets import (TreeviewTooltip, DebouncedScrollableFrame)
-from ..dialogs import (GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
+from ..dialogs import (FormatTemplateEditDialog, GlossaryEditDialog, SanitizerRuleDialog, FailedChunkEditorDialog, MalformedBlockEditorDialog, PerspectiveFailedEditorDialog)
 
 
 try:
@@ -93,6 +99,7 @@ class FixerMixin:
         self.fixer_view = ctk.CTkTabview(parent)
         self.fixer_view.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self._fixer_action_buttons: list = []
+        self.fixer_format_template = load_format_template(format_template_path())
         self._build_fixer_glossary_subtab(self.fixer_view.add("词表矫正"))
         self._build_fixer_resplit_subtab(self.fixer_view.add("标题重分"))
         self._build_fixer_reassemble_subtab(self.fixer_view.add("标题重组"))
@@ -293,6 +300,12 @@ class FixerMixin:
             fg_color=THEME["primary"], hover_color=THEME["primary_hover"],
             command=self._fixer_format_add_async,
         ).grid(row=0, column=2, padx=4)
+        self._fixer_action_btn(
+            run_frame, text="🛠 编辑格式模板", width=128,
+            fg_color=THEME["secondary"], hover_color=THEME["secondary_hover"],
+            border_width=1, border_color=THEME["card_border"],
+            command=self._fixer_format_edit_template,
+        ).grid(row=0, column=3, padx=4)
 
         self.fixer_format_preview = ctk.CTkTextbox(tab, height=320)
         self.fixer_format_preview.grid(row=3, column=0, padx=8, pady=(0, 8), sticky="nsew")
@@ -738,6 +751,30 @@ class FixerMixin:
 
 
     # ---------------- 格式整理（检测/清理/新增） ----------------
+    def _fixer_format_edit_template(self):
+        self.fixer_format_template = load_format_template(format_template_path())
+        dialog = FormatTemplateEditDialog(
+            self,
+            template=self.fixer_format_template,
+            on_apply=self._on_fixer_format_template_saved,
+        )
+        self.wait_window(dialog)
+
+
+    def _on_fixer_format_template_saved(self, template: FormatTemplate):
+        self.fixer_format_template = template
+        try:
+            format_template_path().write_text(
+                json.dumps(template.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning("提示", f"格式模板保存失败：{exc}", parent=self)
+            return
+        self.status_var.set("格式模板已保存")
+        self.log(f"格式模板已保存：{format_template_path()}")
+
+
     def _fixer_format_detect_async(self):
         epub = self._fixer_require_path("检测提示")
         if epub is None:
@@ -834,7 +871,11 @@ class FixerMixin:
         epub = self._fixer_require_path("新增格式提示")
         if epub is None:
             return
-        self._fixer_dispatch(lambda: preview_add_format(epub), self._on_fixer_format_add_preview_done)
+        template = self.fixer_format_template
+        self._fixer_dispatch(
+            lambda: preview_add_format(epub, template=template),
+            self._on_fixer_format_add_preview_done,
+        )
 
 
     def _on_fixer_format_add_preview_done(self, result):
@@ -845,8 +886,16 @@ class FixerMixin:
             f"· 正文总字数：{result['total_chars']:,} 字\n"
             f"· 章节数：{result['chapter_count']}\n"
             f"· 预计阅读时长：约 {result['predicted_minutes']} 分钟\n"
-            f"· 将生成「制作说明」章节 + 每章字数统计。"
+            f"· 将生成「制作说明」章节 + 每章字数统计。\n\n"
+            f"———— 制作说明模板预览 ————\n"
+            + "\n".join(result.get("note_body") or [])
         )
+        if result.get("title_css_enabled"):
+            preview += (
+                f"\n\n———— 标题 CSS 排版 ————\n"
+                f"已开启，将写入独立样式表并关联到每个章节标题：\n"
+                f"{result.get('title_css') or ''}"
+            )
         self._render_fixer_preview(self.fixer_format_preview, preview)
         ok = messagebox.askyesno(
             "确认新增",
@@ -859,8 +908,9 @@ class FixerMixin:
         src = Path(epub)
         mode = self.fixer_mode_var.get()
         output, _ = self._fixer_output_path(src, mode, "_styled")
+        template = self.fixer_format_template
         self._fixer_dispatch(
-            lambda: apply_add_format(epub, output),
+            lambda: apply_add_format(epub, output, template=template),
             lambda done: self._on_fixer_format_add_done(done, output, src),
         )
 
@@ -872,5 +922,7 @@ class FixerMixin:
             f"新增格式完成：正文总字数 {result['total_chars']:,} 字，"
             f"共 {result['chapter_count']} 章。\n输出：{output}"
         )
+        if result.get("title_css"):
+            msg += "\n已启用标题 CSS 排版（写入独立样式表并关联章节标题）。"
         self.log(msg)
         self._fixer_offer_switch(msg, output, src)

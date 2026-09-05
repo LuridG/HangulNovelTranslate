@@ -1,0 +1,22 @@
+{
+  "production_title": "制作说明",
+  "production_lines": [
+    "【制作说明】",
+    "生成时间：${generated_at}",
+    "制作工具：韩语小说批量翻译工具",
+    "---------------------------",
+    "【书籍统计】",
+    "• 总字数：${total_chars} 字",
+    "• 预计阅读时长：约 ${minutes} 分钟",
+    "• 总章节：${chapter_count} 章",
+    "• 封面字体：${cover_font}（自用字体）",
+    "• 正文字体：系统默认字体",
+    "• 标题字体：同正文字体",
+    "本电子书由程序自动生成，仅供个人学习及预览使用，请支持正版。"
+  ],
+  "production_style": {},
+  "word_count_template": "(本章字数: ${chars})",
+  "word_count_style": {},
+  "title_enabled": false,
+  "title_style": {}
+}

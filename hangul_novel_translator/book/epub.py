@@ -917,6 +917,26 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
         for res in css_resources
         if str(res["name"]).lower().endswith(".css")
     }
+    # 标题 CSS 排版：写入独立样式表并由每章 <link> 关联；给章节标题加统一 class。
+    title_css_cfg = metadata.get("title_css") or {}
+    title_class = re.sub(
+        r"[^A-Za-z0-9_-]", "", str(title_css_cfg.get("class") or "")
+    ) or "chapter-title"
+    title_css_text = str(title_css_cfg.get("css") or "").strip()
+    has_title_css = bool(title_css_text)
+    title_css_name = "Styles/title.css"
+    if has_title_css:
+        existing_names = {str(res.get("name")) for res in css_resources}
+        suffix = 2
+        while title_css_name in existing_names:
+            title_css_name = f"Styles/title_{suffix}.css"
+            suffix += 1
+        css_resources.append(
+            {
+                "name": title_css_name,
+                "content": title_css_text.encode("utf-8"),
+            }
+        )
     chapter_css_map = metadata.get("chapter_css") or {}
 
     chapter_items: list = []
@@ -941,6 +961,8 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
         else:
             for name in sorted(css_names):
                 item.add_link(href=_relative_epub_href(file_name, name), rel="stylesheet", type="text/css")
+        if has_title_css:
+            item.add_link(href=_relative_epub_href(file_name, title_css_name), rel="stylesheet", type="text/css")
         inline_styles = doc_inline_css.get(chapter.source_id) or []
         if inline_styles:
             # 原文档的内联 <style> 转成独立 CSS 项，只挂到对应章节。
@@ -954,9 +976,17 @@ def export_epub(book: Book, path: Path, source_title: str | None = None, sanitiz
             )
         if needs_cjk_fallback:
             item.add_link(href=_relative_epub_href(file_name, fallback_css_name), rel="stylesheet", type="text/css")
-        body = [
-            f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
-        ]
+        if has_title_css:
+            title_html = (
+                f"<h{chapter.heading_level} class=\"{title_class}\">"
+                f"{html.escape(chapter.display_title)}</h{chapter.heading_level}>"
+            )
+        else:
+            title_html = (
+                f"<h{chapter.heading_level}>{html.escape(chapter.display_title)}"
+                f"</h{chapter.heading_level}>"
+            )
+        body = [title_html]
         prev_key = None
         prev_style: ParagraphStyle | None = None
         first = True
