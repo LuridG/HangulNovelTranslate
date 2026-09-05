@@ -393,6 +393,8 @@ class ShellMixin:
 
     def _on_error(self, message: str):
         self._set_busy(False)
+        if hasattr(self, "_fixer_set_busy"):
+            self._fixer_set_busy(False)
         self.status_var.set("出错")
         self.log(f"错误：{message}")
         messagebox.showerror("错误", message, parent=self)
